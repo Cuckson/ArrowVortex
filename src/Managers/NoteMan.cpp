@@ -16,6 +16,7 @@
 #include <Editor/Editor.h>
 #include <Editor/History.h>
 #include <Editor/Selection.h>
+#include <Editor/Session.h>
 #include <Editor/View.h>
 
 #include <Managers/SimfileMan.h>
@@ -230,6 +231,9 @@ struct NotesManImpl : public NotesMan {
         chart->notes.remove(rem);
         chart->notes.insert(add);
         chart->notes.sanitize(chart);
+
+        // Let the session host broadcast the change to the guest.
+        if (gSession) gSession->onNotesApplied(chart, add, rem);
 
         // Jump to the position of the first note that changed.
         bool updated = false;
@@ -687,6 +691,13 @@ struct NotesManImpl : public NotesMan {
         auto& add = result.add;
         auto& rem = result.rem;
 
+        // A session guest never applies edits locally; the host applies them
+        // and sends back the result.
+        if (gSession && gSession->isGuest()) {
+            gSession->forwardEdit(add, rem);
+            return;
+        }
+
         if (desc == nullptr && add.size() == 1 && rem.empty()) {
             myQueueAddNote(*add.begin());
         } else if (desc == nullptr && rem.size() == 1 && add.empty()) {
@@ -717,7 +728,40 @@ struct NotesManImpl : public NotesMan {
     }
 
     void insertRows(int startRow, int numRows, bool curChartOnly) override {
+        if (gSession && gSession->isGuest()) {
+            HudWarning("Inserting rows is not available to a session guest.");
+            return;
+        }
         myQueueInsertRows(startRow, numRows, curChartOnly);
+    }
+
+    // ================================================================================================
+    // NotesManImpl :: co-editing functions.
+
+    void applyRemoteEdit(const NoteList& add, const NoteList& rem) override {
+        if (!myChart) return;
+
+        // Keep the local selection, which myUpdateNotes resets.
+        NoteList selected;
+        for (auto& note : myNotes) {
+            if (note.isSelected) selected.append(CompressNote(note));
+        }
+
+        myChart->notes.remove(rem);
+        myChart->notes.insert(add);
+        myUpdateNotes();
+
+        if (!selected.empty()) {
+            select(SELECT_SET, selected.begin(), selected.size(), true);
+        }
+        gEditor->reportChanges(VCM_NOTES_CHANGED);
+    }
+
+    void replaceNotes(const NoteList& notes) override {
+        if (!myChart) return;
+        myChart->notes = notes;
+        myUpdateNotes();
+        gEditor->reportChanges(VCM_NOTES_CHANGED);
     }
 
     // ================================================================================================

@@ -11,10 +11,12 @@ list(APPEND INC
 	"Menubar.h"
 	"Minimap.h"
 	"Music.h"
+	"NetSocket.h"
 	"Notefield.h"
 	"NotefieldPreview.h"
 	"RatingEstimator.h"
 	"Selection.h"
+	"Session.h"
 	"Shortcuts.h"
 	"Sound.h"
 	"Statusbar.h"
@@ -41,10 +43,12 @@ list(APPEND SRC
 	"Menubar.cpp"
 	"Minimap.cpp"
 	"Music.cpp"
+	"NetSocket.cpp"
 	"Notefield.cpp"
 	"NotefieldPreview.cpp"
 	"RatingEstimator.cpp"
 	"Selection.cpp"
+	"Session.cpp"
 	"Shortcuts.cpp"
 	"Sound.cpp"
 	"Statusbar.cpp"
@@ -59,3 +63,6 @@ add_library(Editor STATIC ${SRC} ${INC})
 target_include_directories(Editor PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_directories(Editor PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(Editor PRIVATE Core Dialogs MAD::MAD Managers Simfile System Aubio::aubio iir::iir_static Vorbis::vorbisfile Vorbis::vorbis Ogg::ogg ${FFMPEG_LIBRARIES} SDL3::SDL3)
+if(WIN32)
+    target_link_libraries(Editor PRIVATE ws2_32)
+endif()

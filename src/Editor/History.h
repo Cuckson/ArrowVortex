@@ -44,6 +44,14 @@ struct History : public InputHandler {
     virtual void onFileSaved() = 0;
 
     virtual bool hasUnsavedChanges() const = 0;
+
+    /// Removes all entries, keeping the unsaved changes state. Used when the
+    /// chart is changed by a co-editing session, which invalidates the diffs.
+    virtual void clearAll() = 0;
+
+    /// Marks the file as having unsaved changes that were made outside of the
+    /// history (e.g. received from a co-editing session).
+    virtual void markExternalChange() = 0;
 };
 
 extern History* gHistory;

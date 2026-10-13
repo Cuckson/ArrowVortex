@@ -139,6 +139,10 @@ bool Action::perform(Type action) {
             gEditor->openDialog(DIALOG_PREVIEW_SETTINGS);
             break;
         }
+        case OPEN_DIALOG_COLLABORATE: {
+            gEditor->openDialog(DIALOG_COLLABORATE);
+            break;
+        }
 
         case EDIT_UNDO: {
             gSystem->getEvents().addKeyPress(Key::Z, Keyflag::CTRL, false);

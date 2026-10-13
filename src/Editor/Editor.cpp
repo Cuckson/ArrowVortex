@@ -29,6 +29,7 @@
 #include <Editor/TextOverlay.h>
 #include <Editor/Statusbar.h>
 #include <Editor/History.h>
+#include <Editor/Session.h>
 #include <Editor/StreamGenerator.h>
 
 #include <Managers/StyleMan.h>
@@ -55,6 +56,7 @@
 #include <Dialogs/CustomSnap.h>
 #include <Dialogs/PreviewSettings.h>
 #include <Dialogs/EditSegment.h>
+#include <Dialogs/Collaborate.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -258,6 +260,7 @@ struct EditorImpl : public Editor, public InputHandler {
         Statusbar::create(settings);
         Minimap::create();
         Menubar::create();
+        Session::create();
         gSystem->createMenu();
 
         // Load the editor logo.
@@ -293,6 +296,7 @@ struct EditorImpl : public Editor, public InputHandler {
         delete gui_;
 
         // Destroy the editor components.
+        Session::destroy();
         Minimap::destroy();
         Statusbar::destroy();
         Editing::destroy();
@@ -848,6 +852,9 @@ struct EditorImpl : public Editor, public InputHandler {
             case DIALOG_EDIT_SEGMENT:
                 dlg = new DialogEditSegment;
                 break;
+            case DIALOG_COLLABORATE:
+                dlg = new DialogCollaborate;
+                break;
         };
 
         if (dlg == nullptr) {
@@ -923,6 +930,7 @@ struct EditorImpl : public Editor, public InputHandler {
         gNotefield->onChanges(myChanges);
         gTempoBoxes->onChanges(myChanges);
         gWaveform->onChanges(myChanges);
+        gSession->onChanges(myChanges);
 
         for (auto dialog : myDialogs) {
             if (dialog.ptr) dialog.ptr->onChanges(myChanges);
@@ -974,6 +982,9 @@ struct EditorImpl : public Editor, public InputHandler {
     }
 
     void tick() override {
+        // Apply messages received by the co-editing session.
+        gSession->tick();
+
         InputEvents& events = gSystem->getEvents();
         handleInputs(events);
         notifyChanges();

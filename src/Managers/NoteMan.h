@@ -64,6 +64,12 @@ struct NotesMan {
     virtual void removeSelectedNotes() = 0;
     virtual void insertRows(int row, int numRows, bool curChartOnly) = 0;
 
+    // Co-editing functions. These change the active chart directly, without
+    // creating history entries; they are used by the session guest to apply
+    // changes received from the host.
+    virtual void applyRemoteEdit(const NoteList& add, const NoteList& rem) = 0;
+    virtual void replaceNotes(const NoteList& notes) = 0;
+
     // Clipboard functions.
     virtual int minSelectionRow() const = 0;
     virtual void copyToClipboard(std::string& out, int minRow,
