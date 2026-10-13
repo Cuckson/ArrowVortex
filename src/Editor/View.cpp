@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <numeric>
 
 #include <Core/Draw.h>
 #include <Core/Gui.h>
@@ -51,7 +53,12 @@ struct ViewImpl : public View, public InputHandler {
     bool myUseTimeBasedView = true;
     bool myUseReverseScroll = false;
     bool myUseChartPreview = false;
-    double myCustomSnap = 20;
+    double myCustomSnap = 20;  // The selected custom snap.
+    // Custom snaps in the snap list, sorted ascending.
+    std::vector<double> myCustomSnaps;
+    // Snap sequence as a repeating sequence of row steps; empty when unused.
+    std::vector<int> mySnapSequence;
+    std::vector<int> mySnapSequenceRows;  // Prefix sums, starting at zero.
     SnapType mySnapType = ST_NONE;
 
     // ================================================================================================
@@ -81,6 +88,17 @@ struct ViewImpl : public View, public InputHandler {
             view->get("previewOffset", &myPreviewOffset);
 
             myCustomSnap = ClampCustomSnap(myCustomSnap);
+            const char* snaps = view->get("customSnaps");
+            if (snaps) {
+                for (double snap : ParseCustomSnaps(snaps)) {
+                    insertCustomSnap(snap);
+                }
+            } else if (!isRegularSnap(myCustomSnap)) {
+                // Settings from before the snap list had one custom snap.
+                insertCustomSnap(myCustomSnap);
+            }
+            const char* seq = view->get("customSnapSequence");
+            if (seq) applySnapSequence(ParseSnapSequence(seq));
             myZoomLevel = std::clamp(myZoomLevel, -2.0, 16.0);
             myScaleLevel = std::clamp(myScaleLevel, 1.0, 10.0);
         }
@@ -96,6 +114,10 @@ struct ViewImpl : public View, public InputHandler {
         view->addAttrib("useReverseScroll", myUseReverseScroll);
         view->addAttrib("useChartPreview", myUseChartPreview);
         view->addAttrib("customSnap", myCustomSnap);
+        view->addAttrib("customSnaps",
+                        FormatCustomSnaps(myCustomSnaps).c_str());
+        view->addAttrib("customSnapSequence",
+                        FormatSnapSequence(mySnapSequence).c_str());
         view->addAttrib("zoomLevel", static_cast<long>(myZoomLevel));
         view->addAttrib("scaleLevel", static_cast<long>(myScaleLevel));
         view->addAttrib("receptorX", static_cast<long>(myReceptorX));
@@ -127,14 +149,17 @@ struct ViewImpl : public View, public InputHandler {
     }
 
     void onMousePress(MousePress& evt) override {
+        // In mouse mode, left click places notes, so the receptors are locked.
+        bool canDrag = !gEditing->hasMouseMode();
+
         // Dragging the preview receptors.
-        if (evt.button == Mouse::LMB &&
+        if (canDrag && evt.button == Mouse::LMB &&
             isMouseOverReceptorsPreview(evt.x, evt.y) && !evt.handled) {
             myIsDraggingReceptorsPreview = true;
             evt.handled = true;
         }
         // Dragging the receptors.
-        else if (evt.button == Mouse::LMB &&
+        else if (canDrag && evt.button == Mouse::LMB &&
                  isMouseOverReceptors(evt.x, evt.y) && !evt.handled) {
             myIsDraggingReceptors = true;
             evt.handled = true;
@@ -188,10 +213,22 @@ struct ViewImpl : public View, public InputHandler {
 
     double getCustomSnap() const override { return myCustomSnap; }
 
+    const std::vector<double>& getCustomSnaps() const override {
+        return myCustomSnaps;
+    }
+
     SnapType getSnapType() const override { return mySnapType; }
 
     int getSnapQuant() override {
-        if (mySnapType != ST_CUSTOM) return 192 / sRowSnapTypes[mySnapType];
+        if (mySnapType < ST_CUSTOM) return 192 / sRowSnapTypes[mySnapType];
+
+        // A sequence repeats on the grid of the greatest common divisor of
+        // its steps.
+        if (mySnapType == ST_SEQUENCE) {
+            int step = 192;
+            for (int s : mySnapSequence) step = std::gcd(step, s);
+            return 192 / step;
+        }
 
         // A decimal snap repeats after a number of measures; use the smallest
         // per-measure grid that contains every snap position.
@@ -207,8 +244,11 @@ struct ViewImpl : public View, public InputHandler {
     }
 
     double getSnapsPerMeasure() override {
+        if (mySnapType < ST_CUSTOM) return 192.0 / sRowSnapTypes[mySnapType];
         if (mySnapType == ST_CUSTOM) return myCustomSnap;
-        return 192.0 / sRowSnapTypes[mySnapType];
+        // The average number of positions per measure.
+        return 192.0 * static_cast<double>(mySnapSequence.size()) /
+               mySnapSequenceRows.back();
     }
 
     // Custom snaps have a precision of two decimals.
@@ -220,17 +260,171 @@ struct ViewImpl : public View, public InputHandler {
     // Returns the row of the n-th custom snap position. The positions are
     // spaced evenly from row zero, so decimal snaps continue across measures.
     int customSnapRow(int64_t n) const {
+        if (mySnapType == ST_SEQUENCE) {
+            auto len = static_cast<int64_t>(mySnapSequence.size());
+            int64_t cycle = FloorDiv(n, len);
+            return static_cast<int>(cycle * mySnapSequenceRows.back() +
+                                    mySnapSequenceRows[n - cycle * len]);
+        }
         return static_cast<int>(
             std::round(static_cast<double>(n) * 192.0 / myCustomSnap));
     }
 
     // Returns the index of the last custom snap position on or before row.
     int64_t customSnapIndexBefore(int row) const {
+        if (mySnapType == ST_SEQUENCE) {
+            int64_t period = mySnapSequenceRows.back();
+            int64_t cycle = FloorDiv(row, period);
+            auto offset = static_cast<int>(row - cycle * period);
+            // Last prefix sum that is on or before the offset.
+            auto it = std::upper_bound(mySnapSequenceRows.begin(),
+                                       mySnapSequenceRows.end() - 1, offset);
+            auto index = static_cast<int64_t>(it - mySnapSequenceRows.begin());
+            return cycle * static_cast<int64_t>(mySnapSequence.size()) + index -
+                   1;
+        }
         auto n = static_cast<int64_t>(
             std::floor(static_cast<double>(row) * myCustomSnap / 192.0));
         while (customSnapRow(n + 1) <= row) ++n;
         while (customSnapRow(n) > row) --n;
         return n;
+    }
+
+    static int64_t FloorDiv(int64_t a, int64_t b) {
+        int64_t q = a / b;
+        return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
+    }
+
+    const std::vector<int>& getCustomSnapSequence() const override {
+        return mySnapSequence;
+    }
+
+    int getCustomSnapRow(int64_t n) const override { return customSnapRow(n); }
+
+    int64_t getCustomSnapIndexBefore(int row) const override {
+        return customSnapIndexBefore(row);
+    }
+
+    // Returns true if the snap is one of the regular snaps (4th to 192nd).
+    static bool isRegularSnap(double snap) {
+        for (int i = ST_4TH; i < ST_CUSTOM; ++i) {
+            if (192.0 / sRowSnapTypes[i] == snap) return true;
+        }
+        return false;
+    }
+
+    static bool SameSnap(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+    // Returns the snaps per measure of a regular snap type.
+    static double RegularSnap(int type) {
+        return type == ST_NONE ? 0.0 : 192.0 / sRowSnapTypes[type];
+    }
+
+    // Parses a list of custom snaps (e.g. "20 28 12.5").
+    static std::vector<double> ParseCustomSnaps(const char* text) {
+        std::vector<double> out;
+        while (*text) {
+            char* end = nullptr;
+            double snap = std::strtod(text, &end);
+            if (end == text) {
+                ++text;
+            } else {
+                if (snap >= 1.0 && snap <= 192.0) out.push_back(snap);
+                text = end;
+            }
+        }
+        return out;
+    }
+
+    static std::string FormatCustomSnaps(const std::vector<double>& snaps) {
+        std::string out;
+        for (double snap : snaps) {
+            if (!out.empty()) out += " ";
+            out += FormatSnap(snap);
+        }
+        return out;
+    }
+
+    // Inserts a custom snap into the sorted list; returns false if it is a
+    // regular snap or already in the list.
+    bool insertCustomSnap(double snap) {
+        snap = ClampCustomSnap(snap);
+        if (isRegularSnap(snap)) return false;
+        auto it = std::lower_bound(myCustomSnaps.begin(), myCustomSnaps.end(),
+                                   snap - 1e-6);
+        if (it != myCustomSnaps.end() && SameSnap(*it, snap)) return false;
+        myCustomSnaps.insert(it, snap);
+        return true;
+    }
+
+    // An entry of the snap list that is scrolled through.
+    struct SnapEntry {
+        SnapType type;
+        double custom;
+    };
+
+    // Returns the snap list: none, the regular snaps with the custom snaps
+    // sorted in between, then the snap sequence if there is one.
+    std::vector<SnapEntry> getSnapList() const {
+        std::vector<SnapEntry> list = {{ST_NONE, 0.0}};
+        auto custom = myCustomSnaps.begin();
+        for (int i = ST_4TH; i < ST_CUSTOM; ++i) {
+            for (; custom != myCustomSnaps.end() && *custom < RegularSnap(i);
+                 ++custom) {
+                list.push_back({ST_CUSTOM, *custom});
+            }
+            list.push_back({static_cast<SnapType>(i), 0.0});
+        }
+        if (!mySnapSequence.empty()) list.push_back({ST_SEQUENCE, 0.0});
+        return list;
+    }
+
+    // Returns the index of the current snap in the snap list. A selected
+    // custom snap that is not in the list gives the entry before it.
+    int getSnapListIndex(const std::vector<SnapEntry>& list) const {
+        int before = 0;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+            const SnapEntry& e = list[i];
+            if (e.type == mySnapType &&
+                (e.type != ST_CUSTOM || SameSnap(e.custom, myCustomSnap))) {
+                return i;
+            }
+            if (e.type == ST_SEQUENCE) continue;
+            double snap = e.type == ST_CUSTOM ? e.custom : RegularSnap(e.type);
+            if (snap < myCustomSnap) before = i;
+        }
+        return before;
+    }
+
+    void selectSnapEntry(const SnapEntry& entry) {
+        if (entry.type == ST_CUSTOM) {
+            setCustomSnap(entry.custom);
+        } else {
+            setSnapType(entry.type);
+        }
+    }
+
+    void stepSnap(int delta) override {
+        auto list = getSnapList();
+        auto size = static_cast<int>(list.size());
+        int current = getSnapListIndex(list);
+        // A selected custom snap that is not in the list sits right after
+        // the entry before it.
+        const SnapEntry& e = list[current];
+        bool inList = e.type == mySnapType &&
+                      (e.type != ST_CUSTOM || SameSnap(e.custom, myCustomSnap));
+        if (!inList && delta < 0) ++current;
+        int index = ((current + delta) % size + size) % size;
+        selectSnapEntry(list[index]);
+    }
+
+    // Stores a sequence of row steps and its prefix sums.
+    void applySnapSequence(const std::vector<int>& steps) {
+        mySnapSequence = steps;
+        mySnapSequenceRows.assign(1, 0);
+        for (int step : steps) {
+            mySnapSequenceRows.push_back(mySnapSequenceRows.back() + step);
+        }
     }
 
     bool isTimeBased() const override { return myUseTimeBasedView; }
@@ -290,9 +484,10 @@ struct ViewImpl : public View, public InputHandler {
         }
 
         // Set cursor to arrows when hovering over/dragging the receptors.
-        if (myIsDraggingReceptors || isMouseOverReceptors(mpos.x, mpos.y) ||
-            myIsDraggingReceptorsPreview ||
-            isMouseOverReceptorsPreview(mpos.x, mpos.y)) {
+        bool canDrag = !gEditing->hasMouseMode();
+        if (myIsDraggingReceptors || myIsDraggingReceptorsPreview ||
+            (canDrag && (isMouseOverReceptors(mpos.x, mpos.y) ||
+                         isMouseOverReceptorsPreview(mpos.x, mpos.y)))) {
             gSystem->setCursor(Cursor::SIZE_ALL);
         }
 
@@ -392,11 +587,14 @@ struct ViewImpl : public View, public InputHandler {
     }
 
     void setSnapType(int type) override {
-        if (type < 0) type = NUM_SNAP_TYPES - 1;
-        if (type > NUM_SNAP_TYPES - 1) type = 0;
+        if (type < 0 || type >= NUM_SNAP_TYPES) type = ST_NONE;
+        if (type == ST_SEQUENCE && mySnapSequence.empty()) type = ST_NONE;
         if (mySnapType != type) {
             mySnapType = static_cast<SnapType>(type);
-            if (mySnapType == ST_CUSTOM) {
+            if (mySnapType == ST_SEQUENCE) {
+                HudNote("Snap: Sequence (%s)",
+                        FormatSnapSequence(mySnapSequence, ", ").c_str());
+            } else if (mySnapType == ST_CUSTOM) {
                 HudNote("Snap: Custom (%s)", FormatSnap(myCustomSnap).c_str());
             } else {
                 HudNote("Snap: %s", ToString(mySnapType));
@@ -416,8 +614,39 @@ struct ViewImpl : public View, public InputHandler {
         }
         if (myCustomSnap != size || mySnapType != ST_CUSTOM) {
             myCustomSnap = size;
+            mySnapType = ST_NONE;  // Shows the snap note for the new value.
             setSnapType(ST_CUSTOM);
         }
+    }
+
+    void addCustomSnap(double snap) override {
+        if (snap < 1.0 || snap > 192.0) return;
+        insertCustomSnap(snap);
+        setCustomSnap(snap);
+    }
+
+    void removeCustomSnap(double snap) override {
+        auto it = std::find_if(myCustomSnaps.begin(), myCustomSnaps.end(),
+                               [snap](double s) { return SameSnap(s, snap); });
+        if (it == myCustomSnaps.end()) return;
+        // If the removed snap is selected, select the entry before it.
+        bool selected = mySnapType == ST_CUSTOM && SameSnap(myCustomSnap, *it);
+        std::vector<SnapEntry> list = getSnapList();
+        int index = getSnapListIndex(list);
+        myCustomSnaps.erase(it);
+        if (selected) selectSnapEntry(list[std::max(index - 1, 0)]);
+    }
+
+    void setCustomSnapSequence(const std::vector<int>& steps) override {
+        if (steps.empty()) {
+            applySnapSequence({});
+            if (mySnapType == ST_SEQUENCE) setSnapType(ST_NONE);
+            return;
+        }
+        if (steps == mySnapSequence && mySnapType == ST_SEQUENCE) return;
+        applySnapSequence(steps);
+        mySnapType = ST_NONE;  // Shows the snap note for the new sequence.
+        setSnapType(ST_SEQUENCE);
     }
 
     void setCursorTime(double time) override {
@@ -663,8 +892,8 @@ struct ViewImpl : public View, public InputHandler {
             // the given row is equal to the snap row.
             row = row + ((dir == SNAP_UP) ? -1 : 1);
 
-            // Custom snaps
-            if (mySnapType == ST_CUSTOM) {
+            // Custom snaps and sequences.
+            if (mySnapType >= ST_CUSTOM) {
                 int64_t n = customSnapIndexBefore(row);
                 if (dir != SNAP_UP && customSnapRow(n) < row) ++n;
                 row = customSnapRow(n);

@@ -4,8 +4,8 @@
 
 namespace Vortex {
 
-static const int sRowSnapTypes[NUM_SNAP_TYPES] = {1, 48, 24, 16, 12, 8,
-                                                  6, 4,  3,  2,  1,  0};
+static const int sRowSnapTypes[NUM_SNAP_TYPES] = {1, 48, 24, 16, 12, 8, 6,
+                                                  4, 3,  2,  1,  0,  0};
 
 // Represents a time stamp in time-based mode, and a row in row-based mode.
 typedef double ChartOffset;
@@ -42,9 +42,22 @@ struct View {
     virtual void setCursorToSelection(bool top) = 0;
 
     virtual void setSnapType(int type) = 0;
-    /// Sets the custom snap, in notes per measure (192 rows); it can have
-    /// decimals, in which case the snap grid continues across measures.
+    /// Moves through the snap list (none, the regular snaps with the custom
+    /// snaps sorted in between, then the snap sequence) by the given number
+    /// of entries, wrapping around at the ends.
+    virtual void stepSnap(int delta) = 0;
+    /// Selects a custom snap, in notes per measure (192 rows); it can have
+    /// decimals, in which case the snap grid continues across measures. A
+    /// value equal to a regular snap selects that snap instead.
     virtual void setCustomSnap(double snap) = 0;
+    /// Adds a custom snap to the snap list and selects it.
+    virtual void addCustomSnap(double snap) = 0;
+    /// Removes a custom snap from the snap list.
+    virtual void removeCustomSnap(double snap) = 0;
+    /// Sets the snap sequence, a repeating sequence of row steps in 192nds
+    /// (e.g. {16, 8, 8}) starting from row zero, and selects it. An empty
+    /// sequence removes it from the snap list.
+    virtual void setCustomSnapSequence(const std::vector<int>& steps) = 0;
     virtual int snapRow(int row, SnapDir direction) = 0;
     virtual bool isAlignedToSnap(int row) = 0;
 
@@ -80,6 +93,15 @@ struct View {
     virtual double getSnapsPerMeasure() = 0;
 
     virtual double getCustomSnap() const = 0;
+    /// Returns the custom snaps in the snap list, sorted ascending.
+    virtual const std::vector<double>& getCustomSnaps() const = 0;
+    virtual const std::vector<int>& getCustomSnapSequence() const = 0;
+
+    /// Returns the row of the n-th custom snap (or sequence) position,
+    /// counted from row 0.
+    virtual int getCustomSnapRow(int64_t n) const = 0;
+    /// Returns the index of the last custom snap position on or before row.
+    virtual int64_t getCustomSnapIndexBefore(int row) const = 0;
     virtual bool isTimeBased() const = 0;
     virtual bool hasReverseScroll() const = 0;
     virtual bool hasChartPreview() const = 0;

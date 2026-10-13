@@ -411,13 +411,10 @@ struct NotefieldImpl : public Notefield {
         double snapStep =
             useSnap ? 192.0 / gView->getSnapsPerMeasure() : ROWS_PER_BEAT;
 
-        // Custom snaps can have decimals, in which case the snap positions
-        // are spaced evenly from the first row instead of each measure.
-        bool customGrid = useSnap && gView->getSnapType() == ST_CUSTOM;
-        auto gridRow = [snapStep](int64_t n) {
-            return static_cast<int>(
-                std::round(static_cast<double>(n) * snapStep));
-        };
+        // Custom snaps can have decimals or be a sequence of steps, in which
+        // case the snap positions continue from the first row instead of
+        // starting over at each measure.
+        bool customGrid = useSnap && gView->getSnapType() >= ST_CUSTOM;
 
         DrawPosHelper drawPos;
         while (it != end && row < drawEndRow) {
@@ -442,12 +439,10 @@ struct NotefieldImpl : public Notefield {
                     };
                     if (customGrid) {
                         // First grid position after the measure line.
-                        auto n = static_cast<int64_t>(row / snapStep);
-                        while (n > 0 && gridRow(n - 1) > row) --n;
-                        while (gridRow(n) <= row) ++n;
-                        for (int r = gridRow(n);
+                        int64_t n = gView->getCustomSnapIndexBefore(row) + 1;
+                        for (int r = gView->getCustomSnapRow(n);
                              r < measureEnd && r <= drawEndRow;
-                             r = gridRow(++n)) {
+                             r = gView->getCustomSnapRow(++n)) {
                             drawLine(r);
                         }
                     } else {
@@ -630,7 +625,8 @@ struct NotefieldImpl : public Notefield {
         auto batch = Renderer::batchT();
         for (int i = 0; i < 2; ++i) {
             int vx = x[i] + gView->applyZoom(i * 40 - 20);
-            mySnapIcons[snapType].draw(&batch, vx, myY);
+            // The sequence uses the custom snap icon.
+            mySnapIcons[std::min(snapType, ST_CUSTOM)].draw(&batch, vx, myY);
         }
         batch.flush();
 
@@ -640,6 +636,7 @@ struct NotefieldImpl : public Notefield {
             textStyle.fontSize = gView->getZoomLevel() >= 4 ? 11 : 9;
 
             std::string snap = FormatSnap(gView->getSnapsPerMeasure());
+            if (gView->getSnapType() == ST_SEQUENCE) snap = "seq";
 
             for (int i = 0; i < 2; ++i) {
                 int vx = x[i] + gView->applyZoom(i * 40 - 20);

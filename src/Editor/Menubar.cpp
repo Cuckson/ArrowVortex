@@ -369,7 +369,8 @@ struct MenuBarImpl : public Menubar {
         Item* hViewSnap = newMenu();
         add(hViewSnap, SNAP_RESET, "Reset");
         sep(hViewSnap);
-        add(hViewSnap, OPEN_DIALOG_CUSTOM_SNAP, "Set Snap");
+        add(hViewSnap, OPEN_DIALOG_CUSTOM_SNAP, "Custom snaps...");
+        add(hViewSnap, OPEN_DIALOG_SNAP_SEQUENCE, "Snap sequence...");
         add(hViewSnap, SNAP_PREVIOUS, "Previous");
         add(hViewSnap, SNAP_NEXT, "Next");
 

@@ -440,17 +440,6 @@ static void EncodeNote(WriteStream& out, const Note& in,
     }
 }
 
-// Moves a row to the closest position of a quantization grid with the given
-// number of evenly spaced positions per measure.
-static int SnapToQuant(int row, int quant) {
-    int measure = row >= 0 ? row / 192 : (row - 191) / 192;
-    int offset = row - measure * 192;
-    double step = 192.0 / quant;
-    int snapped = static_cast<int>(
-        std::round(std::round(static_cast<double>(offset) / step) * step));
-    return measure * 192 + snapped;
-}
-
 static void DecodeNote(ReadStream& in, Note& out, int offsetRows) {
     uint8_t col = in.read<uint8_t>();
     if ((col & 0x80) == 0) {
@@ -535,37 +524,6 @@ void NoteList::decode(ReadStream& in, const TimingData& timing,
         DecodeNote(in, note, tracker, offsetTime);
         append(note);
     }
-}
-
-void NoteList::snapToQuantization() {
-    if (myNum == 0) return;
-
-    for (int i = 0; i < myNum; ++i) {
-        Note& note = myNotes[i];
-        if (note.quant == 0 || note.quant > 192) note.quant = 192;
-        if (192 % note.quant == 0) continue;
-        int row = SnapToQuant(note.row, static_cast<int>(note.quant));
-        int endrow = SnapToQuant(note.endrow, static_cast<int>(note.quant));
-        note.row = std::max(0, row);
-        note.endrow = std::max(note.row, endrow);
-    }
-
-    // Snapping can change the order of the notes, or make them overlap.
-    std::stable_sort(
-        myNotes, myNotes + myNum, [](const Note& a, const Note& b) {
-            return a.row < b.row || (a.row == b.row && a.col < b.col);
-        });
-    std::vector<int> endrows;
-    for (int i = 0; i < myNum; ++i) {
-        Note& note = myNotes[i];
-        if (note.col >= endrows.size()) endrows.resize(note.col + 1, -1);
-        if (note.row <= endrows[note.col]) {
-            note.row = -1;
-        } else {
-            endrows[note.col] = note.endrow;
-        }
-    }
-    cleanup();
 }
 
 // ================================================================================================

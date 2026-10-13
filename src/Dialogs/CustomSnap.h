@@ -4,6 +4,8 @@
 #include <Core/Widgets.h>
 #include <Core/WidgetsLayout.h>
 
+#include <vector>
+
 namespace Vortex {
 
 class DialogCustomSnap : public EditorDialog, public InputHandler {
@@ -11,13 +13,21 @@ class DialogCustomSnap : public EditorDialog, public InputHandler {
     ~DialogCustomSnap();
     DialogCustomSnap();
 
-    void onChange();
+    void onTick() override;
+
+    void onAdd();
+    void onSelect();
+    void onRemove();
 
    private:
     void myCreateWidgets();
+    void myUpdateSnapList();
 
     double myCustomSnap;
+
+    WgDroplist* mySnapList = nullptr;
+    int mySnapIndex = 0;
+    std::vector<double> mySnaps;
 };
 
 };  // namespace Vortex
-#pragma once

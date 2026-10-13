@@ -60,12 +60,6 @@ class NoteList {
     // Alternative version of decode that reads time stamps instead of rows.
     void decode(ReadStream& in, const TimingData& timing, double offsetTime);
 
-    /// Moves notes with a quantization that does not divide a measure (e.g.
-    /// 20ths) to the closest position of their quantization grid, and sorts
-    /// the notes. Used after pasting, since the copied row offsets do not
-    /// line up with the grid at the paste position.
-    void snapToQuantization();
-
     // Returns the number of stored notes.
     inline int size() const { return myNum; }
 

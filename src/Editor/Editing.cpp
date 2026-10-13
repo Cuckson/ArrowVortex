@@ -353,15 +353,17 @@ struct EditingImpl : public Editing {
     const ExpandedNote* getNoteUnderMouse(int x, int y) {
         if (gChart->isClosed()) return nullptr;
         int radius = gSystem->applyScaleFactor(gView->applyZoom(32));
-        int bestDist = radius * radius;
+        int64_t bestDist = static_cast<int64_t>(radius) * radius;
         const ExpandedNote* head = nullptr;
         const ExpandedNote* body = nullptr;
         for (auto& note : *gNotes) {
             int dx = x - gView->columnToX(note.col);
             if (abs(dx) >= radius) continue;
             int ny = gView->rowToY(note.row);
-            int dy = y - ny;
-            int dist = dx * dx + dy * dy;
+            // Notes far from the mouse can be millions of pixels away, so the
+            // squared distance is computed in 64 bits to avoid overflowing.
+            int64_t dy = static_cast<int64_t>(y) - ny;
+            int64_t dist = static_cast<int64_t>(dx) * dx + dy * dy;
             if (dist < bestDist) {
                 bestDist = dist;
                 head = &note;
@@ -950,8 +952,8 @@ struct EditingImpl : public Editing {
 
         // Get RowType from SnapType
         const RowType snapToRowType[NUM_SNAP_TYPES] = {
-            RT_192TH, RT_4TH,  RT_8TH,  RT_12TH,  RT_16TH,  RT_24TH,
-            RT_32ND,  RT_48TH, RT_64TH, RT_192TH, RT_192TH, RT_192TH};
+            RT_192TH, RT_4TH,  RT_8TH,   RT_12TH,  RT_16TH,  RT_24TH, RT_32ND,
+            RT_48TH,  RT_64TH, RT_192TH, RT_192TH, RT_192TH, RT_192TH};
         auto currentType = snapToRowType[gView->getSnapType()];
 
         // Get all Notes by Row

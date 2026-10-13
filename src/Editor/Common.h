@@ -120,6 +120,7 @@ enum SnapType {
     ST_96TH,
     ST_192TH,
     ST_CUSTOM,
+    ST_SEQUENCE,
 
     NUM_SNAP_TYPES,
 };
@@ -139,6 +140,14 @@ const std::string OrdinalSuffix(int i);
 
 // Returns a snap value (notes per measure) with up to two decimals.
 std::string FormatSnap(double snapsPerMeasure);
+
+// Parses a sequence of row steps in 192nds (e.g. "16 8 8" or "16,8,8").
+// Returns an empty list if the text contains no valid steps.
+std::vector<int> ParseSnapSequence(const std::string& text);
+
+// Returns a sequence of row steps as text, separated by the given string.
+std::string FormatSnapSequence(const std::vector<int>& steps,
+                               const char* separator = " ");
 
 // Returns the color representation of the given difficulty type.
 uint32_t ToColor(Difficulty dt);

@@ -135,6 +135,10 @@ bool Action::perform(Type action) {
             gEditor->openDialog(DIALOG_CUSTOM_SNAP);
             break;
         }
+        case OPEN_DIALOG_SNAP_SEQUENCE: {
+            gEditor->openDialog(DIALOG_SNAP_SEQUENCE);
+            break;
+        }
         case OPEN_DIALOG_PREVIEW_SETTINGS: {
             gEditor->openDialog(DIALOG_PREVIEW_SETTINGS);
             break;
@@ -718,11 +722,11 @@ bool Action::perform(Type action) {
         }
 
         case SNAP_NEXT: {
-            gView->setSnapType(gView->getSnapType() + 1);
+            gView->stepSnap(1);
             break;
         }
         case SNAP_PREVIOUS: {
-            gView->setSnapType(gView->getSnapType() - 1);
+            gView->stepSnap(-1);
             break;
         }
         case SNAP_RESET: {

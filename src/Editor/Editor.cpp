@@ -54,6 +54,7 @@
 #include <Dialogs/WaveformSettings.h>
 #include <Dialogs/Zoom.h>
 #include <Dialogs/CustomSnap.h>
+#include <Dialogs/SnapSequence.h>
 #include <Dialogs/PreviewSettings.h>
 #include <Dialogs/EditSegment.h>
 #include <Dialogs/Collaborate.h>
@@ -847,6 +848,9 @@ struct EditorImpl : public Editor, public InputHandler {
             case DIALOG_CUSTOM_SNAP:
                 dlg = new DialogCustomSnap;
                 break;
+            case DIALOG_SNAP_SEQUENCE:
+                dlg = new DialogSnapSequence;
+                break;
             case DIALOG_PREVIEW_SETTINGS:
                 dlg = new DialogPreviewSettings;
                 break;
@@ -1046,8 +1050,7 @@ struct EditorImpl : public Editor, public InputHandler {
                 if (gEditing->hasMouseMode() && !scroll->handled &&
                     (scroll->keyflags & Keyflag::CTRL) &&
                     !(scroll->keyflags & (Keyflag::ALT | Keyflag::SHIFT))) {
-                    gView->setSnapType(gView->getSnapType() +
-                                       (scroll->up ? 1 : -1));
+                    gView->stepSnap(scroll->up ? 1 : -1);
                     scroll->handled = true;
                     continue;
                 }

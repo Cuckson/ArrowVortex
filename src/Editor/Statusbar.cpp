@@ -109,7 +109,10 @@ struct StatusbarImpl : public Statusbar {
         }
 
         if (myShowSnap) {
-            const char* snap = ToString(gView->getSnapType());
+            std::string snap = ToString(gView->getSnapType());
+            if (gView->getSnapType() == ST_CUSTOM) {
+                snap += " (" + FormatSnap(gView->getCustomSnap()) + ")";
+            }
             info.emplace_back(Str::fmt("{tc:888}Snap:{tc} %1").arg(snap));
         }
 

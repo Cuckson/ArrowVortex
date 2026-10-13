@@ -1,5 +1,8 @@
 #include <Editor/Common.h>
 
+#include <algorithm>
+#include <string>
+
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -33,13 +36,39 @@ uint32_t ToColor(Difficulty dt) {
 
 const char* ToString(SnapType st) {
     static const char* text[NUM_SNAP_TYPES] = {
-        "None", "4th",  "8th",  "12th", "16th",  "24th",
-        "32nd", "48th", "64th", "96th", "192nd", "Custom"};
+        "None", "4th",  "8th",  "12th",  "16th",   "24th",    "32nd",
+        "48th", "64th", "96th", "192nd", "Custom", "Sequence"};
     return (st >= 0 && st < NUM_SNAP_TYPES) ? text[st] : text[0];
 }
 
 std::string FormatSnap(double snapsPerMeasure) {
     return Str::val(snapsPerMeasure, 0, 2);
+}
+
+std::vector<int> ParseSnapSequence(const std::string& text) {
+    std::vector<int> steps;
+    int value = -1;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        char c = (i < text.size()) ? text[i] : ' ';
+        if (c >= '0' && c <= '9') {
+            if (value < 0) value = 0;
+            value = std::min(value * 10 + (c - '0'), 10000);
+        } else if (value >= 0) {
+            if (value >= 1 && value <= 192) steps.push_back(value);
+            value = -1;
+        }
+    }
+    return steps;
+}
+
+std::string FormatSnapSequence(const std::vector<int>& steps,
+                               const char* separator) {
+    std::string out;
+    for (size_t i = 0; i < steps.size(); ++i) {
+        if (i > 0) out += separator;
+        out += std::to_string(steps[i]);
+    }
+    return out;
 }
 
 const std::string OrdinalSuffix(int i) {
