@@ -23,6 +23,7 @@ struct Menubar : public InputHandler {
         SHOW_TEMPO_HELP,
 
         USE_JUMP_TO_NEXT_NOTE,
+        USE_MOUSE_MODE,
         USE_UNDO_REDO_JUMP,
         USE_TIME_BASED_COPY,
         USE_REVERSE_SCROLL,

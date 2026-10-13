@@ -12,10 +12,13 @@ namespace Vortex {
 ///
 /// Guests connect to the host directly, and the host relays every change to
 /// the other guests. When a guest joins, its simfile is replaced by the host's
-/// (metadata, timing and all charts). After that, everyone can edit notes,
-/// timing, chart properties and song metadata; changes are applied locally
-/// right away and sent to everyone else. Changes received from others do not
-/// create history entries, so undo/redo only reverts your own edits.
+/// (metadata, timing and all charts). A guest that does not have the host's
+/// song open first downloads the music and simfile to "saves/<song folder>"
+/// next to the executable, opens it, and then joins automatically. After that,
+/// everyone can edit notes, timing, chart properties and song metadata; changes
+/// are applied locally right away and sent to everyone else. Changes received
+/// from others do not create history entries, so undo/redo only reverts your
+/// own edits.
 ///
 /// All network I/O runs on a worker thread; received messages are handled on
 /// the main thread in tick().
@@ -28,10 +31,11 @@ struct Session {
 
     enum State {
         STATE_IDLE,
-        STATE_LISTENING,   ///< Hosting, waiting for (more) guests.
-        STATE_CONNECTING,  ///< Guest connecting to the host.
-        STATE_HANDSHAKE,   ///< Connected, verifying the song.
-        STATE_CONNECTED,   ///< Song verified, changes are synced.
+        STATE_LISTENING,    ///< Hosting, waiting for (more) guests.
+        STATE_CONNECTING,   ///< Guest connecting to the host.
+        STATE_HANDSHAKE,    ///< Connected, verifying the song.
+        STATE_DOWNLOADING,  ///< Guest downloading the host's song files.
+        STATE_CONNECTED,    ///< Song verified, changes are synced.
     };
 
     /// Another user in the session, and where they are in the song.
@@ -80,6 +84,9 @@ struct Session {
     /// Ends the current session, if any.
     virtual void disconnect() = 0;
 
+    /// Host: removes a guest from the session.
+    virtual void kick(uint32_t id) = 0;
+
     /// Sets the name that is shown to the other users.
     virtual void setUserName(const std::string& name) = 0;
     virtual const std::string& getUserName() const = 0;
@@ -101,7 +108,8 @@ struct Session {
     virtual void onNotesApplied(const Chart* chart, const NoteList& add,
                                 const NoteList& rem) = 0;
 
-    /// Draws the mouse cursors of the other users over the notefield.
+    /// Draws the mouse cursors, receptors and selected notes of the other
+    /// users over the notefield.
     virtual void drawCursors() = 0;
 };
 

@@ -27,6 +27,8 @@
 #include <Editor/History.h>
 #include <Editor/Music.h>
 #include <Editor/NetSocket.h>
+#include <Editor/Notefield.h>
+#include <Editor/Selection.h>
 #include <Editor/TextOverlay.h>
 #include <Editor/View.h>
 
@@ -59,23 +61,41 @@ namespace {
 // made them ("origin"). The host is user 0; guests get ids from 1 upwards.
 
 const uint32_t PROTOCOL_MAGIC = 0x504D5641;  // "AVMP"
-const uint16_t PROTOCOL_VERSION = 2;
+const uint16_t PROTOCOL_VERSION = 3;
 const uint32_t MAX_FRAME_SIZE = 64 * 1024 * 1024;
 
 const uint32_t HOST_ID = 0;
 const int MAX_GUESTS = 16;
 
 enum MessageType : uint8_t {
-    MSG_HELLO = 1,           // G->H: magic, version, name, song info.
-    MSG_WELCOME = 2,         // H->G: ok, reason, guest id.
-    MSG_FULL_STATE = 3,      // H->G: song sections and all charts.
-    MSG_PEER_LIST = 4,       // H->G: count, [id, name].
-    MSG_NOTE_EDIT = 5,       // both: origin, chart, add, rem, checksum.
-    MSG_NOTE_REPLACE = 6,    // both: origin, chart, notes, checksum.
-    MSG_STATE = 7,           // both: origin, section, id, data.
-    MSG_PRESENCE = 8,        // both: origin, chart, hover, times.
-    MSG_RESYNC_REQUEST = 9,  // G->H: chart.
-    MSG_DISCONNECT = 10,     // both: reason.
+    MSG_HELLO = 1,              // G->H: magic, version, name, song info.
+    MSG_WELCOME = 2,            // H->G: ok, reason, guest id.
+    MSG_FULL_STATE = 3,         // H->G: song sections and all charts.
+    MSG_PEER_LIST = 4,          // H->G: count, [id, name].
+    MSG_NOTE_EDIT = 5,          // both: origin, chart, add, rem, checksum.
+    MSG_NOTE_REPLACE = 6,       // both: origin, chart, notes, checksum.
+    MSG_STATE = 7,              // both: origin, section, id, data.
+    MSG_PRESENCE = 8,           // both: origin, chart, hover, times.
+    MSG_RESYNC_REQUEST = 9,     // G->H: chart.
+    MSG_DISCONNECT = 10,        // both: reason.
+    MSG_SELECTION = 11,         // both: origin, chart, region, selected notes.
+    MSG_DOWNLOAD_REQUEST = 12,  // G->H: need music.
+    MSG_FILE_DATA = 13,         // H->G: kind, name, size, offset, data.
+    MSG_DOWNLOAD_DONE = 14,     // H->G: simfile name, music name.
+};
+
+// Result of a join request, sent in the welcome message.
+enum WelcomeResult : uint8_t {
+    WELCOME_REJECTED = 0,
+    WELCOME_OK = 1,
+    WELCOME_DOWNLOAD = 2,  // The guest needs to download the song first.
+};
+
+// Kinds of files sent to a guest that downloads the song.
+enum FileKind : uint8_t {
+    FILE_MUSIC = 0,
+    FILE_SIMFILE = 1,
+    FILE_IMAGE = 2,
 };
 
 // Song and chart data other than notes is synced as "sections": each section
@@ -89,6 +109,13 @@ enum SectionType : uint8_t {
 const int CONNECT_TIMEOUT_MS = 5000;
 const int POLL_INTERVAL_MS = 20;
 const int PRESENCE_INTERVAL_MS = 33;
+const int SELECTION_INTERVAL_MS = 100;
+
+const uint32_t MAX_SELECTION_SIZE = 1000000;
+const uint32_t FILE_CHUNK_SIZE = 1024 * 1024;
+const uint64_t MAX_MUSIC_SIZE = 1024ULL * 1024 * 1024;
+const uint64_t MAX_OTHER_FILE_SIZE = 32ULL * 1024 * 1024;
+const int REJOIN_TIMEOUT_SECONDS = 120;
 
 typedef std::vector<uint8_t> Bytes;
 
@@ -130,16 +157,20 @@ static Bytes ReadBytes(ReadStream& in) {
 // Song verification.
 
 struct SongInfo {
+    bool hasSong = false;
     uint64_t audioHash = 0;
     double duration = 0.0;
+    uint64_t audioSize = 0;
 };
 
-static bool HashFile(const fs::path& path, uint64_t& out) {
+static bool HashFile(const fs::path& path, uint64_t& out,
+                     uint64_t* size = nullptr) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
 
     // 64-bit FNV-1a.
     uint64_t hash = 14695981039346656037ULL;
+    uint64_t total = 0;
     std::vector<char> buffer(1 << 16);
     while (file) {
         file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
@@ -148,8 +179,10 @@ static bool HashFile(const fs::path& path, uint64_t& out) {
             hash ^= static_cast<uint8_t>(buffer[i]);
             hash *= 1099511628211ULL;
         }
+        total += n;
     }
     out = hash;
+    if (size) *size = total;
     return true;
 }
 
@@ -168,12 +201,57 @@ static bool GetLocalSongInfo(SongInfo& out, std::string& error) {
         return false;
     }
     fs::path path = utf8ToPath(sim->dir) / utf8ToPath(sim->music);
-    if (!HashFile(path, out.audioHash)) {
+    if (!HashFile(path, out.audioHash, &out.audioSize)) {
         error = "Could not read the music file.";
         return false;
     }
     out.duration = gMusic->getSongLength();
+    out.hasSong = true;
     return true;
+}
+
+// ================================================================================================
+// Song download.
+
+// Returns the name if it is a plain file name that is safe to create in the
+// download folder, or an empty string otherwise.
+static std::string SafeFileName(const std::string& name) {
+    if (name.empty() || name.size() > 200 || name == "." || name == "..") {
+        return std::string();
+    }
+    for (char c : name) {
+        auto u = static_cast<unsigned char>(c);
+        if (u < 32 || std::strchr("<>:\"/\\|?*", c)) return std::string();
+    }
+    if (name.back() == '.' || name.back() == ' ') return std::string();
+    return name;
+}
+
+// Turns the host's song folder name into a folder name that is safe to use.
+static std::string SafeFolderName(const std::string& name) {
+    std::string out;
+    for (char c : name) {
+        auto u = static_cast<unsigned char>(c);
+        out.push_back(u < 32 || std::strchr("<>:\"/\\|?*", c) ? '_' : c);
+    }
+    if (out.size() > 100) out.resize(100);
+    while (!out.empty() && (out.back() == '.' || out.back() == ' ')) {
+        out.pop_back();
+    }
+    while (!out.empty() && (out.front() == '.' || out.front() == ' ')) {
+        out.erase(0, 1);
+    }
+    return out.empty() ? std::string("song") : out;
+}
+
+static fs::path SavesDir() {
+    return utf8ToPath(gSystem->getRunDir()) / "saves";
+}
+
+static bool IsSimfileName(const std::string& name) {
+    std::string ext = pathToUtf8(utf8ToPath(name).extension());
+    for (char& c : ext) c = static_cast<char>(std::tolower(c));
+    return ext == ".sm" || ext == ".ssc" || ext == ".dwi" || ext == ".osu";
 }
 
 // Returns an empty string if the songs match, or the reason they don't. The
@@ -750,8 +828,31 @@ struct Presence {
 struct PeerInfo {
     uint32_t id = 0;
     std::string name;
-    bool joined = false;  // Host: passed the song check.
+    bool joined = false;       // Host: passed the song check.
+    bool downloading = false;  // Host: downloading the song files.
     Presence presence;
+
+    // Selected notes and region, on the chart with session id selChart.
+    uint32_t selChart = 0;
+    int regionBegin = 0, regionEnd = 0;
+    std::vector<RowCol> selection;
+};
+
+// Guest: state of a song download from the host.
+struct Download {
+    std::string folder;
+    std::string musicName;
+    uint64_t musicHash = 0;
+    uint64_t musicSize = 0;
+    bool needMusic = true;
+    fs::path dir;
+
+    // The file that is being received.
+    std::ofstream file;
+    std::string fileName;
+    uint64_t fileSize = 0;
+    uint64_t fileWritten = 0;
+    uint64_t totalReceived = 0;
 };
 
 // Sync state of a chart that exists for everyone in the session.
@@ -808,6 +909,21 @@ struct SessionImpl : public Session {
     Presence myPresence;
     Clock::time_point myPresenceTime;
     bool myForcePresence = false;
+
+    // Hash of the last sent selection message.
+    uint64_t mySelectionHash = 0;
+    Clock::time_point mySelectionTime;
+    bool myForceSelection = false;
+
+    // Host: song folder name and music file name offered for download.
+    std::string mySongFolder;
+    std::string myMusicName;
+
+    // Guest: song download, and the join that follows it.
+    std::unique_ptr<Download> myDownload;
+    bool myRejoinPending = false;
+    std::string myRejoinAddress;
+    Clock::time_point myRejoinDeadline;
 
     // ================================================================================================
     // SessionImpl :: constructor and destructor.
@@ -917,6 +1033,13 @@ struct SessionImpl : public Session {
             HudError("Cannot host: %s", error.c_str());
             return false;
         }
+        {
+            const Simfile* sim = gSimfile->get();
+            fs::path dir = utf8ToPath(sim->dir);
+            if (!dir.has_filename()) dir = dir.parent_path();
+            mySongFolder = pathToUtf8(dir.filename());
+            myMusicName = pathToUtf8(utf8ToPath(sim->music).filename());
+        }
         NetSocket listener;
         if (!listener.listen(port, error)) {
             HudError("Cannot host: %s", error.c_str());
@@ -952,6 +1075,7 @@ struct SessionImpl : public Session {
 
     bool join(const std::string& address) override {
         disconnect();
+        myRejoinPending = false;
         if (!myStartNetworking()) return false;
 
         std::string hostName = address;
@@ -976,8 +1100,11 @@ struct SessionImpl : public Session {
                 "replace yours.");
             return false;
         }
+        // Without the song, the guest downloads it from the host.
         std::string error;
-        if (!GetLocalSongInfo(mySong, error)) {
+        mySong = SongInfo();
+        const Simfile* sim = gSimfile->get();
+        if (sim && !sim->music.empty() && !GetLocalSongInfo(mySong, error)) {
             HudError("Cannot join: %s", error.c_str());
             return false;
         }
@@ -997,16 +1124,27 @@ struct SessionImpl : public Session {
     }
 
     void disconnect() override {
+        myRejoinPending = false;
         if (myRole == ROLE_NONE) return;
         if (myRole == ROLE_HOST) {
             for (auto& peer : myPeerInfo) {
                 mySendDisconnect(peer.id, "The host ended the session.");
             }
-        } else if (myState == STATE_HANDSHAKE || myState == STATE_CONNECTED) {
+        } else if (myState == STATE_HANDSHAKE || myState == STATE_DOWNLOADING ||
+                   myState == STATE_CONNECTED) {
             mySendDisconnect(HOST_ID, "Left the session.");
         }
         myEndSession();
         HudInfo("Session ended.");
+    }
+
+    void kick(uint32_t id) override {
+        if (myRole != ROLE_HOST) return;
+        PeerInfo* peer = myFindPeer(id);
+        if (!peer || !peer->joined) return;
+        mySendDisconnect(id, "You were removed from the session by the host.");
+        myLink.dropPeer(id);
+        myRemovePeer(id, "was removed from the session.");
     }
 
     void myResetSyncState() {
@@ -1020,10 +1158,13 @@ struct SessionImpl : public Session {
         mySectionsDirty = false;
         myPresence = Presence();
         myForcePresence = true;
+        mySelectionHash = 0;
+        myForceSelection = true;
     }
 
     void myEndSession() {
         myLink.stop();
+        myDownload.reset();
         myRole = ROLE_NONE;
         myState = STATE_IDLE;
         mySimfile = nullptr;
@@ -1063,6 +1204,16 @@ struct SessionImpl : public Session {
                 return "Connecting to " + myAddress + "...";
             case STATE_HANDSHAKE:
                 return "Verifying song...";
+            case STATE_DOWNLOADING: {
+                if (!myDownload || myDownload->fileName.empty()) {
+                    return "Downloading the song from the host...";
+                }
+                const Download& d = *myDownload;
+                return std::format(
+                    "Downloading {} ({:.1f} / {:.1f} MB)...", d.fileName,
+                    static_cast<double>(d.fileWritten) / (1024.0 * 1024.0),
+                    static_cast<double>(d.fileSize) / (1024.0 * 1024.0));
+            }
             case STATE_CONNECTED:
                 if (!myHasState) return "Receiving the host's simfile...";
                 return "Connected to " + myAddress + ". Users: " + myUserList();
@@ -1427,7 +1578,10 @@ struct SessionImpl : public Session {
         if (changes & (VCM_NOTES_CHANGED | VCM_CHART_LIST_CHANGED)) {
             myCheckNoteChanges();
         }
-        if (changes & VCM_CHART_CHANGED) myForcePresence = true;
+        if (changes & VCM_CHART_CHANGED) {
+            myForcePresence = true;
+            myForceSelection = true;
+        }
     }
 
     // ================================================================================================
@@ -1530,9 +1684,98 @@ struct SessionImpl : public Session {
     }
 
     // ================================================================================================
+    // SessionImpl :: selection.
+
+    static void WriteSelection(WriteStream& out, uint32_t origin,
+                               uint32_t chart, int regionBegin, int regionEnd,
+                               const std::vector<RowCol>& notes) {
+        out.write<uint32_t>(origin);
+        out.write<uint32_t>(chart);
+        out.write<int32_t>(regionBegin);
+        out.write<int32_t>(regionEnd);
+        auto count = static_cast<uint32_t>(
+            std::min<size_t>(notes.size(), MAX_SELECTION_SIZE));
+        out.writeNum(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            out.writeNum(static_cast<uint32_t>(std::max(0, notes[i].row)));
+            out.write<uint8_t>(static_cast<uint8_t>(notes[i].col));
+        }
+    }
+
+    // Writes the selection of the local user.
+    void myWriteLocalSelection(WriteStream& out) {
+        uint32_t chart = myChartId(gChart->get());
+        std::vector<RowCol> notes;
+        int begin = 0, end = 0;
+        if (chart != 0 && gChart->isOpen()) {
+            for (const auto& note : *gNotes) {
+                if (note.isSelected) notes.push_back({note.row, note.col});
+            }
+            auto region = gSelection->getSelectedRegion();
+            begin = region.beginRow;
+            end = region.endRow;
+        }
+        WriteSelection(out, myId, chart, begin, end, notes);
+    }
+
+    // Sends the selected notes and region when they changed, so that other
+    // users can see what is highlighted.
+    void mySendSelection() {
+        if (!myIsSyncing()) return;
+        auto now = Clock::now();
+        if (!myForceSelection &&
+            now - mySelectionTime <
+                std::chrono::milliseconds(SELECTION_INTERVAL_MS)) {
+            return;
+        }
+        mySelectionTime = now;
+        WriteStream out;
+        myWriteLocalSelection(out);
+        uint64_t hash = HashBytes(out.data(), static_cast<size_t>(out.size()));
+        if (!myForceSelection && hash == mySelectionHash) return;
+        myForceSelection = false;
+        mySelectionHash = hash;
+        mySendChange(MSG_SELECTION, out);
+    }
+
+    void myHandleSelection(uint32_t sender, ReadStream& in) {
+        uint32_t origin = in.read<uint32_t>();
+        uint32_t chart = in.read<uint32_t>();
+        int regionBegin = in.read<int32_t>();
+        int regionEnd = in.read<int32_t>();
+        uint32_t count = in.readNum();
+        if (!in.success() || count > MAX_SELECTION_SIZE) return;
+        std::vector<RowCol> notes;
+        notes.reserve(std::min<uint32_t>(count, in.bytesleft() / 2 + 1));
+        for (uint32_t i = 0; i < count && in.success(); ++i) {
+            RowCol n;
+            n.row = static_cast<int>(in.readNum());
+            n.col = in.read<uint8_t>();
+            notes.push_back(n);
+        }
+        if (!in.success()) return;
+        if (myRole == ROLE_HOST) origin = sender;
+
+        PeerInfo* peer = myFindPeer(origin);
+        if (!peer) return;
+        peer->selChart = chart;
+        peer->regionBegin = regionBegin;
+        peer->regionEnd = regionEnd;
+        peer->selection = std::move(notes);
+
+        if (myRole == ROLE_HOST) {
+            WriteStream out;
+            WriteSelection(out, origin, chart, regionBegin, regionEnd,
+                           peer->selection);
+            myBroadcast(MSG_SELECTION, out, origin);
+        }
+    }
+
+    // ================================================================================================
     // SessionImpl :: receiving.
 
     void tick() override {
+        if (myRejoinPending) myCheckRejoin();
         if (myRole == ROLE_NONE) return;
 
         // Send local changes before applying remote ones, so that pending
@@ -1550,6 +1793,7 @@ struct SessionImpl : public Session {
         if (myRole == ROLE_NONE) return;
 
         mySendPresence();
+        mySendSelection();
         myUpdatePeers();
     }
 
@@ -1626,6 +1870,7 @@ struct SessionImpl : public Session {
         if (in.success() && magic == PROTOCOL_MAGIC &&
             version == PROTOCOL_VERSION) {
             in.readStr(name);
+            guestSong.hasSong = in.read<uint8_t>() != 0;
             in.read(guestSong.audioHash);
             in.read(guestSong.duration);
         }
@@ -1642,15 +1887,34 @@ struct SessionImpl : public Session {
                 PROTOCOL_VERSION, version);
         } else if (numJoined >= MAX_GUESTS) {
             reason = "The session is full.";
-        } else {
-            reason = CompareSongs(mySong, guestSong);
         }
 
+        // A guest without the same song downloads it first.
+        bool download =
+            reason.empty() &&
+            (!guestSong.hasSong || !CompareSongs(mySong, guestSong).empty());
+
         WriteStream out;
-        out.write<uint8_t>(reason.empty() ? 1 : 0);
+        out.write<uint8_t>(!reason.empty() ? WELCOME_REJECTED
+                           : download      ? WELCOME_DOWNLOAD
+                                           : WELCOME_OK);
         out.writeStr(reason);
         out.write<uint32_t>(peer.id);
+        if (download) {
+            out.writeStr(mySongFolder);
+            out.writeStr(myMusicName);
+            out.write<uint64_t>(mySong.audioHash);
+            out.write<uint64_t>(mySong.audioSize);
+        }
         mySendTo(peer.id, MSG_WELCOME, out);
+
+        if (download) {
+            peer.downloading = true;
+            peer.name = SanitizeName(name);
+            HudInfo("%s is downloading the song.",
+                    peer.name.empty() ? "A guest" : peer.name.c_str());
+            return;
+        }
 
         if (!reason.empty()) {
             uint32_t id = peer.id;
@@ -1678,7 +1942,96 @@ struct SessionImpl : public Session {
             WritePresence(presence, other.id, other.presence);
             mySendTo(peer.id, MSG_PRESENCE, presence);
         }
+
+        // And what everyone has selected.
+        {
+            WriteStream selection;
+            myWriteLocalSelection(selection);
+            mySendTo(peer.id, MSG_SELECTION, selection);
+        }
+        for (auto& other : myPeerInfo) {
+            if (!other.joined || other.id == peer.id) continue;
+            WriteStream selection;
+            WriteSelection(selection, other.id, other.selChart,
+                           other.regionBegin, other.regionEnd, other.selection);
+            mySendTo(peer.id, MSG_SELECTION, selection);
+        }
         HudInfo("%s joined the session.", peer.name.c_str());
+    }
+
+    // Sends one file in chunks. Returns false if it could not be read.
+    bool mySendFile(uint32_t peer, FileKind kind, const fs::path& path,
+                    const std::string& name, uint64_t maxSize) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) return false;
+        auto end = file.tellg();
+        if (end < 0) return false;
+        auto size = static_cast<uint64_t>(end);
+        if (size > maxSize) return false;
+        file.seekg(0);
+
+        Bytes chunk(FILE_CHUNK_SIZE);
+        uint64_t offset = 0;
+        do {
+            auto n = static_cast<uint32_t>(
+                std::min<uint64_t>(FILE_CHUNK_SIZE, size - offset));
+            file.read(reinterpret_cast<char*>(chunk.data()), n);
+            if (static_cast<uint64_t>(file.gcount()) != n) return false;
+
+            WriteStream out;
+            out.write<uint8_t>(kind);
+            out.writeStr(name);
+            out.write<uint64_t>(size);
+            out.write<uint64_t>(offset);
+            out.writeNum(n);
+            if (n > 0) out.write(chunk.data(), static_cast<int>(n));
+            mySendTo(peer, MSG_FILE_DATA, out);
+            offset += n;
+        } while (offset < size);
+        return true;
+    }
+
+    // Sends the music, simfile and images to a guest that does not have the
+    // song.
+    void mySendSongFiles(uint32_t peer, bool needMusic) {
+        const Simfile* sim = mySim();
+        if (!sim) return;
+        fs::path dir = utf8ToPath(sim->dir);
+
+        if (needMusic &&
+            !mySendFile(peer, FILE_MUSIC, dir / utf8ToPath(sim->music),
+                        myMusicName, MAX_MUSIC_SIZE)) {
+            mySendDisconnect(peer, "The host could not read the music file.");
+            myLink.dropPeer(peer);
+            return;
+        }
+
+        // The simfile as it was last saved; the current state is sent when
+        // the guest joins.
+        std::string simfileName;
+        if (IsSimfileName(sim->file) &&
+            mySendFile(peer, FILE_SIMFILE, dir / utf8ToPath(sim->file),
+                       sim->file, MAX_OTHER_FILE_SIZE)) {
+            simfileName = sim->file;
+        }
+
+        std::vector<std::string> sent = {myMusicName, simfileName};
+        for (const std::string* image :
+             {&sim->banner, &sim->background, &sim->cdTitle}) {
+            if (SafeFileName(*image).empty()) continue;
+            if (std::find(sent.begin(), sent.end(), *image) != sent.end()) {
+                continue;
+            }
+            if (mySendFile(peer, FILE_IMAGE, dir / utf8ToPath(*image), *image,
+                           MAX_OTHER_FILE_SIZE)) {
+                sent.push_back(*image);
+            }
+        }
+
+        WriteStream out;
+        out.writeStr(simfileName);
+        out.writeStr(myMusicName);
+        mySendTo(peer, MSG_DOWNLOAD_DONE, out);
     }
 
     void myHandleHostEvent(NetEvent& evt) {
@@ -1706,7 +2059,16 @@ struct SessionImpl : public Session {
                       static_cast<int>(evt.data.size() - 1));
 
         if (!peer->joined) {
-            if (type == MSG_HELLO) myHandleHello(*peer, in);
+            if (type == MSG_HELLO && !peer->downloading) {
+                myHandleHello(*peer, in);
+            } else if (type == MSG_DOWNLOAD_REQUEST && peer->downloading) {
+                uint8_t needMusic = in.read<uint8_t>();
+                if (in.success()) mySendSongFiles(peer->id, needMusic != 0);
+            } else if (type == MSG_DISCONNECT) {
+                uint32_t id = evt.peer;
+                myLink.dropPeer(id);
+                myRemovePeer(id, "left the session.");
+            }
             return;
         }
 
@@ -1720,6 +2082,9 @@ struct SessionImpl : public Session {
                 return;
             case MSG_PRESENCE:
                 myHandlePresence(evt.peer, in);
+                return;
+            case MSG_SELECTION:
+                myHandleSelection(evt.peer, in);
                 return;
             case MSG_RESYNC_REQUEST: {
                 uint32_t id = in.read<uint32_t>();
@@ -1751,6 +2116,7 @@ struct SessionImpl : public Session {
                 out.write<uint32_t>(PROTOCOL_MAGIC);
                 out.write<uint16_t>(PROTOCOL_VERSION);
                 out.writeStr(myName);
+                out.write<uint8_t>(mySong.hasSong ? 1 : 0);
                 out.write<uint64_t>(mySong.audioHash);
                 out.write<double>(mySong.duration);
                 mySendTo(HOST_ID, MSG_HELLO, out);
@@ -1775,18 +2141,27 @@ struct SessionImpl : public Session {
 
         switch (type) {
             case MSG_WELCOME: {
-                uint8_t ok = in.read<uint8_t>();
+                uint8_t result = in.read<uint8_t>();
                 std::string reason = in.readStr();
                 uint32_t id = in.read<uint32_t>();
-                if (in.success() && ok) {
+                if (in.success() && result == WELCOME_OK) {
                     myId = id;
                     myState = STATE_CONNECTED;
+                } else if (in.success() && result == WELCOME_DOWNLOAD) {
+                    myId = id;
+                    myStartDownload(in);
                 } else {
                     HudError("Join rejected: %s", reason.c_str());
                     myEndSession();
                 }
                 return;
             }
+            case MSG_FILE_DATA:
+                if (myState == STATE_DOWNLOADING) myHandleFileData(in);
+                return;
+            case MSG_DOWNLOAD_DONE:
+                if (myState == STATE_DOWNLOADING) myFinishDownload(in);
+                return;
             case MSG_FULL_STATE:
                 myApplyFullState(in);
                 return;
@@ -1815,8 +2190,198 @@ struct SessionImpl : public Session {
             case MSG_PRESENCE:
                 myHandlePresence(HOST_ID, in);
                 return;
+            case MSG_SELECTION:
+                myHandleSelection(HOST_ID, in);
+                return;
             default:
                 return;
+        }
+    }
+
+    // ================================================================================================
+    // SessionImpl :: guest song download.
+
+    void myDownloadFailed(const std::string& reason) {
+        HudError("Song download failed: %s", reason.c_str());
+        disconnect();
+    }
+
+    void myStartDownload(ReadStream& in) {
+        auto d = std::make_unique<Download>();
+        in.readStr(d->folder);
+        in.readStr(d->musicName);
+        in.read(d->musicHash);
+        in.read(d->musicSize);
+        if (!in.success() || SafeFileName(d->musicName).empty()) {
+            myDownloadFailed("the host sent an invalid music file name.");
+            return;
+        }
+
+        // Each song gets its own folder. Reuse a folder that has the same
+        // music, otherwise pick a new name.
+        fs::path saves = SavesDir();
+        std::string base = SafeFolderName(d->folder);
+        std::error_code ec;
+        for (int n = 1;; ++n) {
+            std::string name =
+                n == 1 ? base : base + " (" + std::to_string(n) + ")";
+            fs::path dir = saves / utf8ToPath(name);
+            if (!fs::exists(dir, ec)) {
+                d->dir = dir;
+                break;
+            }
+            uint64_t hash = 0;
+            fs::path music = dir / utf8ToPath(d->musicName);
+            if (fs::exists(music, ec) && HashFile(music, hash) &&
+                hash == d->musicHash) {
+                d->dir = dir;
+                d->needMusic = false;
+                break;
+            }
+            if (n > 1000) {
+                myDownloadFailed("could not find a free folder name.");
+                return;
+            }
+        }
+        fs::create_directories(d->dir, ec);
+        if (ec) {
+            myDownloadFailed("could not create the folder \"" +
+                             pathToUtf8(d->dir) + "\".");
+            return;
+        }
+
+        myState = STATE_DOWNLOADING;
+        WriteStream out;
+        out.write<uint8_t>(d->needMusic ? 1 : 0);
+        mySendTo(HOST_ID, MSG_DOWNLOAD_REQUEST, out);
+        if (d->needMusic) {
+            HudInfo("Downloading the song from the host (%.1f MB)...",
+                    static_cast<double>(d->musicSize) / (1024.0 * 1024.0));
+        } else {
+            HudInfo("You already have the music; downloading the simfile...");
+        }
+        myDownload = std::move(d);
+    }
+
+    void myHandleFileData(ReadStream& in) {
+        Download& d = *myDownload;
+        uint8_t kind = in.read<uint8_t>();
+        std::string name = in.readStr();
+        uint64_t size = in.read<uint64_t>();
+        uint64_t offset = in.read<uint64_t>();
+        uint32_t n = in.readNum();
+        if (!in.success() || n > static_cast<uint32_t>(in.bytesleft()) ||
+            kind > FILE_IMAGE || SafeFileName(name).empty() ||
+            size >
+                (kind == FILE_MUSIC ? MAX_MUSIC_SIZE : MAX_OTHER_FILE_SIZE) ||
+            offset + n > size || (kind == FILE_MUSIC && name != d.musicName)) {
+            myDownloadFailed("received invalid file data.");
+            return;
+        }
+
+        if (offset == 0) {
+            d.file.close();
+            fs::path path = d.dir / utf8ToPath(name);
+            std::error_code ec;
+            // Keep a backup of a simfile that would be overwritten.
+            if (kind == FILE_SIMFILE && fs::exists(path, ec)) {
+                fs::path backup = path;
+                backup += ".bak";
+                fs::rename(path, backup, ec);
+            }
+            d.file.open(path, std::ios::binary | std::ios::trunc);
+            if (!d.file) {
+                myDownloadFailed("could not write \"" + pathToUtf8(path) +
+                                 "\".");
+                return;
+            }
+            d.fileName = name;
+            d.fileSize = size;
+            d.fileWritten = 0;
+        } else if (name != d.fileName || offset != d.fileWritten) {
+            myDownloadFailed("received file data out of order.");
+            return;
+        }
+
+        if (n > 0) {
+            d.file.write(reinterpret_cast<const char*>(in.pos()), n);
+            in.skip(static_cast<int>(n));
+        }
+        if (!d.file) {
+            myDownloadFailed("could not write \"" + d.fileName + "\".");
+            return;
+        }
+        d.fileWritten += n;
+        d.totalReceived += n;
+        if (d.fileWritten == d.fileSize) d.file.close();
+    }
+
+    void myFinishDownload(ReadStream& in) {
+        std::string simfileName = in.readStr();
+        std::string musicName = in.readStr();
+        Download& d = *myDownload;
+        d.file.close();
+        if (!in.success() || musicName != d.musicName ||
+            (!simfileName.empty() && SafeFileName(simfileName).empty())) {
+            myDownloadFailed("received invalid data.");
+            return;
+        }
+        std::error_code ec;
+        fs::path music = d.dir / utf8ToPath(musicName);
+        if (!fs::exists(music, ec)) {
+            myDownloadFailed("the music file is missing.");
+            return;
+        }
+        fs::path open = music;
+        if (!simfileName.empty()) {
+            fs::path simfile = d.dir / utf8ToPath(simfileName);
+            if (fs::exists(simfile, ec)) open = simfile;
+        }
+
+        // Rejoin once the song is open and its music is loaded.
+        std::string address = myAddress;
+        std::string folder = pathToUtf8(d.dir);
+        mySendDisconnect(HOST_ID, "Downloaded the song.");
+        myEndSession();
+        HudInfo("Saved the song to \"%s\".", folder.c_str());
+
+        if (!gEditor->openSimfile(open)) {
+            HudError("Could not open the downloaded song.");
+            return;
+        }
+        // The simfile can refer to music in another folder; use the
+        // downloaded music then.
+        const Simfile* sim = gSimfile->get();
+        if (open != music &&
+            (!sim || sim->music.empty() ||
+             !fs::exists(utf8ToPath(sim->dir) / utf8ToPath(sim->music), ec))) {
+            if (!gEditor->openSimfile(music)) {
+                HudError("Could not open the downloaded song.");
+                return;
+            }
+        }
+        myRejoinPending = true;
+        myRejoinAddress = address;
+        myRejoinDeadline =
+            Clock::now() + std::chrono::seconds(REJOIN_TIMEOUT_SECONDS);
+    }
+
+    // Joins the session again after downloading the song, once the music
+    // has finished loading.
+    void myCheckRejoin() {
+        if (gSimfile->isClosed()) {
+            myRejoinPending = false;
+            HudError("The downloaded song was closed; not joining.");
+            return;
+        }
+        if (gMusic->getSamples().isCompleted()) {
+            myRejoinPending = false;
+            join(myRejoinAddress);
+            return;
+        }
+        if (Clock::now() > myRejoinDeadline) {
+            myRejoinPending = false;
+            HudError("Timed out waiting for the music to load; not joining.");
         }
     }
 
@@ -1831,6 +2396,10 @@ struct SessionImpl : public Session {
             if (info.id == myId) continue;
             if (PeerInfo* old = myFindPeer(info.id)) {
                 info.presence = old->presence;
+                info.selChart = old->selChart;
+                info.regionBegin = old->regionBegin;
+                info.regionEnd = old->regionEnd;
+                info.selection = old->selection;
             }
             list.push_back(info);
         }
@@ -1937,6 +2506,7 @@ struct SessionImpl : public Session {
         myStoreSectionHashes();
         myHasState = true;
         myForcePresence = true;
+        myForceSelection = true;
         HudInfo("Joined the session at %s.", myAddress.c_str());
     }
 
@@ -1959,12 +2529,50 @@ struct SessionImpl : public Session {
     // ================================================================================================
     // SessionImpl :: drawing.
 
+    // Draws what the other users have selected on the open chart.
+    void myDrawSelections() {
+        uint32_t chart = myChartId(gChart->get());
+        if (chart == 0) return;
+        auto coords = gView->getReceptorCoords();
+        for (const PeerInfo& info : myPeerInfo) {
+            if (myRole == ROLE_HOST && !info.joined) continue;
+            if (info.selChart != chart) continue;
+            uint32_t color = PeerColor(info.id);
+            if (info.regionEnd > info.regionBegin) {
+                int t = gView->rowToY(info.regionBegin);
+                int b = gView->rowToY(info.regionEnd);
+                if (t > b) std::swap(t, b);
+                recti r = {coords.xl, t, coords.xr - coords.xl, b - t};
+                Draw::fill(r, Color32a(color, 40));
+                Draw::outline(r, Color32a(color, 170));
+            }
+            gNotefield->drawPeerSelection(info.selection, Color32a(color, 230));
+        }
+    }
+
+    // Draws the receptors of the other users, which show where notes are
+    // placed when they press a note key.
+    void myDrawReceptors() {
+        recti view = gView->getRect();
+        auto coords = gView->getReceptorCoords();
+        int gap = gSystem->applyScaleFactor(gView->applyZoom(48));
+        for (const Peer& peer : myPeers) {
+            if (!peer.onChart) continue;
+            int y = gView->timeToY(peer.viewTime);
+            if (y < view.y - 64 || y > view.y + view.h + 64) continue;
+            gNotefield->drawPeerReceptors(y, peer.color);
+            DrawNameTag(coords.xr + gap, y, peer.name, peer.color, Text::ML);
+        }
+    }
+
     void drawCursors() override {
         if (myPeers.empty() || gTextOverlay->isOpen()) return;
         recti view = gView->getRect();
         int xc = gView->getReceptorCoords().xc;
         double unit = PixelsPerUnit();
         Renderer::pushScissorRect(view);
+        myDrawSelections();
+        myDrawReceptors();
         for (const Peer& peer : myPeers) {
             if (!peer.onChart || !peer.hasHover) continue;
             int x = xc + static_cast<int>(std::lround(peer.hoverX * unit));

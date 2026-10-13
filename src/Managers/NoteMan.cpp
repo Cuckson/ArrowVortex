@@ -828,6 +828,7 @@ struct NotesManImpl : public NotesMan {
         } else {
             edit.add.decode(stream, gView->getCursorRow());
         }
+        edit.add.snapToQuantization();
 
         if (stream.bytesleft() > 0) {
             HudWarning("Clipboard has invalid note data, bad size.");

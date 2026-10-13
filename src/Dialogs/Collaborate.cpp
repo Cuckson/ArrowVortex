@@ -4,6 +4,7 @@
 #include <Core/Widgets.h>
 #include <Core/WidgetsLayout.h>
 
+#include <Editor/Common.h>
 #include <Editor/Session.h>
 
 #include <cstdlib>
@@ -60,8 +61,18 @@ void DialogCollaborate::myCreateWidgets() {
     joinButton->text.set("Join");
     joinButton->onPress.bind(this, &DialogCollaborate::onJoin);
     joinButton->setTooltip(
-        "Join a session; the same music must be open. Your simfile is "
-        "replaced by the host's");
+        "Join a session. Your simfile is replaced by the host's. If you don't "
+        "have the host's song open, it is downloaded to the \"saves\" "
+        "folder first");
+
+    myGuestList = myLayout.add<WgDroplist>("Guest");
+    myGuestList->value.bind(&myGuestIndex);
+    myGuestList->setTooltip("Guests in the session (host only)");
+
+    WgButton* kick = myLayout.add<WgButton>();
+    kick->text.set("Kick");
+    kick->onPress.bind(this, &DialogCollaborate::onKick);
+    kick->setTooltip("Remove the selected guest from the session");
 
     myLayout.row().col(320);
     WgButton* disconnect = myLayout.add<WgButton>();
@@ -72,7 +83,48 @@ void DialogCollaborate::myCreateWidgets() {
 void DialogCollaborate::onTick() {
     myStatus = gSession->getStatus();
     myShareAddress = gSession->getShareAddress();
+    myUpdateGuestList();
     EditorDialog::onTick();
+}
+
+void DialogCollaborate::myUpdateGuestList() {
+    std::vector<uint32_t> ids;
+    std::vector<std::string> names;
+    if (gSession->getRole() == Session::ROLE_HOST) {
+        for (const auto& peer : gSession->getPeers()) {
+            ids.push_back(peer.id);
+            names.push_back(peer.name);
+        }
+    }
+    if (ids == myGuestIds && names == myGuestNames) return;
+
+    // Keep the same guest selected if they are still there.
+    uint32_t selected = UINT32_MAX;
+    if (myGuestIndex >= 0 &&
+        myGuestIndex < static_cast<int>(myGuestIds.size())) {
+        selected = myGuestIds[myGuestIndex];
+    }
+    myGuestIds = ids;
+    myGuestNames = names;
+    myGuestIndex = 0;
+    myGuestList->clearItems();
+    for (size_t i = 0; i < names.size(); ++i) {
+        myGuestList->addItem(names[i]);
+        if (ids[i] == selected) myGuestIndex = static_cast<int>(i);
+    }
+}
+
+void DialogCollaborate::onKick() {
+    if (gSession->getRole() != Session::ROLE_HOST) {
+        HudNote("Only the host can remove guests.");
+        return;
+    }
+    if (myGuestIndex < 0 ||
+        myGuestIndex >= static_cast<int>(myGuestIds.size())) {
+        HudNote("There are no guests to remove.");
+        return;
+    }
+    gSession->kick(myGuestIds[myGuestIndex]);
 }
 
 void DialogCollaborate::onNameChanged() { gSession->setUserName(myName); }

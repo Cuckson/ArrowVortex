@@ -137,6 +137,9 @@ const char* ToString(SnapType st);
 // Returns a number value with it's ordinal suffix.
 const std::string OrdinalSuffix(int i);
 
+// Returns a snap value (notes per measure) with up to two decimals.
+std::string FormatSnap(double snapsPerMeasure);
+
 // Returns the color representation of the given difficulty type.
 uint32_t ToColor(Difficulty dt);
 

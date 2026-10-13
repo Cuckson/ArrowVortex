@@ -182,6 +182,10 @@ bool Action::perform(Type action) {
             gEditing->toggleJumpToNextNote();
             break;
         }
+        case TOGGLE_MOUSE_MODE: {
+            gEditing->toggleMouseMode();
+            break;
+        }
         case TOGGLE_UNDO_REDO_JUMP: {
             gEditing->toggleUndoRedoJump();
             break;

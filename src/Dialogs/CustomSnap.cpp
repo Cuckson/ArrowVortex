@@ -22,12 +22,15 @@ void DialogCustomSnap::myCreateWidgets() {
     WgSpinner* scol = myLayout.add<WgSpinner>("Snapping");
     scol->value.bind(&myCustomSnap);
     scol->onChange.bind(this, &DialogCustomSnap::onChange);
-    scol->setRange(4.0, 192.0);
-    scol->setPrecision(0, 0);
+    scol->setRange(1.0, 192.0);
+    scol->setPrecision(0, 2);
+    scol->setTooltip(
+        "Notes per measure; decimals are allowed (e.g. 12.5), in which case "
+        "the snap continues across measure lines");
 }
 
 void DialogCustomSnap::onChange() {
-    if (myCustomSnap >= 4 && myCustomSnap <= 192) {
+    if (myCustomSnap >= 1 && myCustomSnap <= 192) {
         gView->setCustomSnap(myCustomSnap);
     }
 }

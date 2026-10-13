@@ -52,6 +52,11 @@ struct Editing : public InputHandler {
 
     virtual void exportNotesAsLuaTable() = 0;
 
+    /// Mouse mode: left click places notes on the snap position under the
+    /// mouse, right click removes notes, and ctrl + scroll changes the snap.
+    virtual void toggleMouseMode() = 0;
+    virtual bool hasMouseMode() = 0;
+
     virtual void toggleJumpToNextNote() = 0;
     virtual bool hasJumpToNextNote() = 0;
 

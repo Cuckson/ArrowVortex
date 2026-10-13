@@ -285,7 +285,10 @@ struct NotefieldImpl : public Notefield {
 
         gNotefieldPreview->draw();
 
-        if (myShowBeatLines || myVisualSyncBeatlines) drawBeatLines();
+        if (myShowBeatLines || myVisualSyncBeatlines ||
+            gEditing->hasMouseMode()) {
+            drawBeatLines();
+        }
         if (drawWaveform) gWaveform->drawPeaks();
         if (gTempoBoxes->hasShowBoxes()) drawStopsAndWarps();
 
@@ -354,6 +357,16 @@ struct NotefieldImpl : public Notefield {
         bool zoomedIn = (gView->getZoomLevel() >= 4);
         int viewH = gView->getHeight();
 
+        // Mouse mode shows all beat line options, so the snap positions that
+        // notes can be placed on are visible.
+        bool mouseMode = gEditing->hasMouseMode();
+        bool showSnap =
+            myShowBeatLinesSnap || myVisualSyncBeatlines || mouseMode;
+        bool showColor =
+            myShowBeatLinesColor || myVisualSyncBeatlines || mouseMode;
+        bool showHover =
+            myShowBeatLinesHover || myVisualSyncBeatlines || mouseMode;
+
         // We keep track of the measure labels to render them afterwards.
         struct MeasureLabel {
             int measure, y;
@@ -388,15 +401,23 @@ struct NotefieldImpl : public Notefield {
         // Start drawing measures and beat lines.
         auto batch = Renderer::batchC();
         uint32_t halfColor = ToColor32({1, 1, 1, 0.5f});
-        uint32_t fullColor = myShowBeatLinesColor || myVisualSyncBeatlines
-                                 ? ToRowTypeColor(0)
-                                 : ToColor32({1, 1, 1, 0.7f});
+        uint32_t fullColor =
+            showColor ? ToRowTypeColor(0) : ToColor32({1, 1, 1, 0.7f});
 
+        // Without a snap, temporary beat lines only show beats.
+        bool useSnap =
+            myShowBeatLinesSnap || ((myVisualSyncBeatlines || mouseMode) &&
+                                    gView->getSnapType() > ST_4TH);
         double snapStep =
-            myShowBeatLinesSnap ||
-                    myVisualSyncBeatlines && gView->getSnapType() > ST_4TH
-                ? 192.0f / gView->getSnapQuant()
-                : ROWS_PER_BEAT;
+            useSnap ? 192.0 / gView->getSnapsPerMeasure() : ROWS_PER_BEAT;
+
+        // Custom snaps can have decimals, in which case the snap positions
+        // are spaced evenly from the first row instead of each measure.
+        bool customGrid = useSnap && gView->getSnapType() == ST_CUSTOM;
+        auto gridRow = [snapStep](int64_t n) {
+            return static_cast<int>(
+                std::round(static_cast<double>(n) * snapStep));
+        };
 
         DrawPosHelper drawPos;
         while (it != end && row < drawEndRow) {
@@ -410,20 +431,32 @@ struct NotefieldImpl : public Notefield {
 
                 // Beat lines.
                 if (zoomedIn) {
-                    double beatRow = row + snapStep;
                     int measureEnd = row + it->rowsPerMeasure;
-                    while (beatRow < measureEnd) {
-                        if (beatRow > drawEndRow) break;
-
-                        int r = static_cast<int>(round(beatRow));
+                    auto drawLine = [&](int r) {
                         uint32_t color =
-                            myShowBeatLinesColor || myVisualSyncBeatlines
+                            showColor
                                 ? (ToRowTypeColor(ToRowType(r)) & halfColor)
                                 : halfColor;
-
                         int y = drawPos.advance(r);
                         Draw::fill(&batch, {myX, y, myW, 1}, color);
-                        beatRow += snapStep;
+                    };
+                    if (customGrid) {
+                        // First grid position after the measure line.
+                        auto n = static_cast<int64_t>(row / snapStep);
+                        while (n > 0 && gridRow(n - 1) > row) --n;
+                        while (gridRow(n) <= row) ++n;
+                        for (int r = gridRow(n);
+                             r < measureEnd && r <= drawEndRow;
+                             r = gridRow(++n)) {
+                            drawLine(r);
+                        }
+                    } else {
+                        double beatRow = row + snapStep;
+                        while (beatRow < measureEnd) {
+                            if (beatRow > drawEndRow) break;
+                            drawLine(static_cast<int>(round(beatRow)));
+                            beatRow += snapStep;
+                        }
                     }
                 }
 
@@ -436,13 +469,12 @@ struct NotefieldImpl : public Notefield {
         }
 
         // Draw Hovered Row
-        if (myShowBeatLinesHover || myVisualSyncBeatlines) {
+        if (showHover) {
             int hoverRow = gView->getHoveredRow();
             if (hoverRow >= 0) {
                 uint32_t hoverColor =
-                    myShowBeatLinesColor
-                        ? ToRowTypeColor(ToRowType(hoverRow)) & halfColor
-                        : halfColor;
+                    showColor ? ToRowTypeColor(ToRowType(hoverRow)) & halfColor
+                              : halfColor;
                 int y = drawPos.get(hoverRow, gTempo->rowToTime(hoverRow));
                 Draw::fill(&batch, {myX, y - 1, myW, 3}, hoverColor);
             }
@@ -607,7 +639,7 @@ struct NotefieldImpl : public Notefield {
             TextStyle textStyle;
             textStyle.fontSize = gView->getZoomLevel() >= 4 ? 11 : 9;
 
-            std::string snap = Str::val(gView->getSnapQuant());
+            std::string snap = FormatSnap(gView->getSnapsPerMeasure());
 
             for (int i = 0; i < 2; ++i) {
                 int vx = x[i] + gView->applyZoom(i * 40 - 20);
@@ -738,7 +770,47 @@ struct NotefieldImpl : public Notefield {
         batch.flush();
     }
 
-    void drawGhostNote(const Note& n) override {
+    void drawGhostNote(const Note& n) override { drawGhostNote(n, 192); }
+
+    void drawHoverNote(const Note& n) override { drawGhostNote(n, 96); }
+
+    void drawPeerReceptors(int y, uint32_t color) override {
+        if (gChart->isClosed()) return;
+        auto noteskin = gNoteskin->get();
+        if (!noteskin) return;
+
+        Renderer::resetColor();
+        Renderer::bindShader(Renderer::SH_TEXTURE);
+        Renderer::bindTexture(noteskin->recepTex.handle());
+        auto batch = Renderer::batchTC();
+        uint32_t tint = Color32a(color, 160);
+        for (int c = 0; c < gStyle->getNumCols(); ++c) {
+            noteskin->recepOff[c].draw(&batch, myColX[c], y, tint);
+        }
+        batch.flush();
+    }
+
+    void drawPeerSelection(const std::vector<RowCol>& notes,
+                           uint32_t color) override {
+        if (gChart->isClosed() || notes.empty()) return;
+        const int numCols = gStyle->getNumCols();
+        const int maxY = gView->getHeight() + 32;
+
+        Renderer::resetColor();
+        Renderer::bindShader(Renderer::SH_TEXTURE);
+        Renderer::bindTexture(mySelectionTex.handle());
+        auto batch = Renderer::batchTC();
+        BatchSprite select(mySelectionTex.size().x, mySelectionTex.size().y);
+        for (const RowCol& n : notes) {
+            if (n.col < 0 || n.col >= numCols) continue;
+            int y = gView->rowToY(n.row);
+            if (y < -32 || y > maxY) continue;
+            select.draw(&batch, myColX[n.col], y, color);
+        }
+        batch.flush();
+    }
+
+    void drawGhostNote(const Note& n, uint8_t alpha) {
         if (n.col < 0 || static_cast<int>(n.col) >= gStyle->getNumCols())
             return;
 
@@ -749,7 +821,7 @@ struct NotefieldImpl : public Notefield {
         const int signedScale = gView->hasReverseScroll() ? -myScale : myScale;
 
         // Render ghost hold.
-        Renderer::setColor(RGBAtoColor32(255, 255, 255, 192));
+        Renderer::setColor(RGBAtoColor32(255, 255, 255, alpha));
         Renderer::bindShader(Renderer::SH_TEXTURE);
         Renderer::bindTexture(noteskin->noteTex.handle());
 

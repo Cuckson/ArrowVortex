@@ -940,6 +940,21 @@ struct EditorImpl : public Editor, public InputHandler {
         myChanges = 0;
     }
 
+    // In mouse mode, ctrl + scroll changes the snap, so zooming is done with
+    // the + and - keys.
+    static Action::Type getMouseModeZoomAction(const KeyPress& press) {
+        if (press.keyflags & (Keyflag::CTRL | Keyflag::ALT)) {
+            return Action::NONE;
+        }
+        if (press.key == Key::EQUAL || press.key == Key::NUMPAD_ADD) {
+            return Action::ZOOM_IN;
+        }
+        if (press.key == Key::DASH || press.key == Key::NUMPAD_SUBTRACT) {
+            return Action::ZOOM_OUT;
+        }
+        return Action::NONE;
+    }
+
     void onKeyPress(KeyPress& press) override {
         // if(press.key == Key::V)
         //{
@@ -1016,6 +1031,9 @@ struct EditorImpl : public Editor, public InputHandler {
             for (KeyPress* press = nullptr; events.next(press);) {
                 Action::Type action =
                     gShortcuts->getAction(press->keyflags, press->key);
+                if (!action && gEditing->hasMouseMode()) {
+                    action = getMouseModeZoomAction(*press);
+                }
                 if (action) {
                     press->handled = Action::perform(action);
                 }
@@ -1024,6 +1042,15 @@ struct EditorImpl : public Editor, public InputHandler {
 
         if (!GuiMain::isCapturingMouse()) {
             for (MouseScroll* scroll = nullptr; events.next(scroll);) {
+                // In mouse mode, ctrl + scroll changes the snap instead.
+                if (gEditing->hasMouseMode() && !scroll->handled &&
+                    (scroll->keyflags & Keyflag::CTRL) &&
+                    !(scroll->keyflags & (Keyflag::ALT | Keyflag::SHIFT))) {
+                    gView->setSnapType(gView->getSnapType() +
+                                       (scroll->up ? 1 : -1));
+                    scroll->handled = true;
+                    continue;
+                }
                 Action::Type action =
                     gShortcuts->getAction(scroll->keyflags, scroll->up);
                 if (action) {

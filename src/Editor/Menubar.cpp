@@ -136,6 +136,7 @@ struct MenuBarImpl : public Menubar {
         add(hEdit, TOGGLE_JUMP_TO_NEXT_NOTE, "Enable jump to next note");
         add(hEdit, TOGGLE_UNDO_REDO_JUMP, "Enable undo/redo jump");
         add(hEdit, TOGGLE_TIME_BASED_COPY, "Enable time-based copy");
+        add(hEdit, TOGGLE_MOUSE_MODE, "Enable mouse mode");
 
         // Chart > Convert menu.
         Item* hChartConvert = newMenu();
@@ -512,6 +513,10 @@ struct MenuBarImpl : public Menubar {
         myUpdateFunctions[USE_JUMP_TO_NEXT_NOTE] = [] {
             MENU->myEditMenu->setChecked(TOGGLE_JUMP_TO_NEXT_NOTE,
                                          gEditing->hasJumpToNextNote());
+        };
+        myUpdateFunctions[USE_MOUSE_MODE] = [] {
+            MENU->myEditMenu->setChecked(TOGGLE_MOUSE_MODE,
+                                         gEditing->hasMouseMode());
         };
         myUpdateFunctions[USE_UNDO_REDO_JUMP] = [] {
             MENU->myEditMenu->setChecked(TOGGLE_UNDO_REDO_JUMP,

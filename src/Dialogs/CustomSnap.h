@@ -16,7 +16,7 @@ class DialogCustomSnap : public EditorDialog, public InputHandler {
    private:
     void myCreateWidgets();
 
-    int myCustomSnap;
+    double myCustomSnap;
 };
 
 };  // namespace Vortex

@@ -10,7 +10,14 @@ Linux and Wine builds (no environment available), real LAN/internet.
 ## Scope
 - 1 host + up to 16 guests, direct TCP (no server, no NAT traversal; LAN / port
   forward / Tailscale / ZeroTier). Default port 7654. The host relays everything.
-- Join requires the same music file (FNV-1a hash + decoded length). On join the
+- A guest without the host's song (nothing open, or different music) downloads
+  it first: music, the host's simfile as saved on disk (.sm/.ssc/.dwi/.osu),
+  and banner/background/CD title if they are plain file names. Files go to
+  `<exe dir>/saves/<host song folder>/` (a folder with the same music is
+  reused, otherwise " (2)" etc. is appended; an overwritten simfile is kept as
+  `.bak`). The guest then opens it, waits for the music to decode (≤ 120 s) and
+  rejoins automatically. Skipped when the same music is already open.
+- Join with the same music file (FNV-1a hash + decoded length): the
   guest's simfile is **replaced by the host's**: metadata, song timing, chart
   list (style, difficulty, meter, step artist, split timing, notes). Join is
   refused if the guest has unsaved changes.
@@ -28,13 +35,18 @@ Linux and Wine builds (no environment available), real LAN/internet.
   arrow + name) when they are on the same chart, and marked on the minimap
   (scrub bar) with their name (hover position, or cursor position if not
   hovering; dimmed "(other chart)" if on another chart).
+- Other users' receptors (where 1-4 place notes, i.e. their cursor time) are
+  drawn tinted in their color with a name tag, and the notes / region they
+  have selected are highlighted in their color (purely visual).
+- The host can kick a guest (Collaborate dialog: Guest list + Kick).
 
 ## Files
 | File | Role |
 |---|---|
 | `src/Editor/NetSocket.{h,cpp}` | Non-blocking IPv4 TCP (Winsock / POSIX). `pollAll` (select over many sockets), `localAddresses` (getifaddrs on POSIX, since the host name resolves to 127.0.1.1 on most Linux distros). Windows uses `SO_EXCLUSIVEADDRUSE`. |
 | `src/Editor/Session.{h,cpp}` | `gSession`. Protocol, `NetLink` worker thread, `SessionImpl`, serialization, cursor drawing. |
-| `src/Dialogs/Collaborate.{h,cpp}` | "COLLABORATE": status, Name, Port+Host, Share+Copy, Join+Join, Disconnect. |
+| `src/Dialogs/Collaborate.{h,cpp}` | "COLLABORATE": status, Name, Port+Host, Share+Copy, Join+Join, Guest+Kick, Disconnect. |
+| `src/Editor/Notefield` | `drawPeerReceptors`, `drawPeerSelection` (tinted selection boxes). |
 | `src/Editor/Minimap.cpp` | `drawPeers()`: scrub-bar markers and stacked name tags. |
 | `src/Managers/NoteMan` | `applyRemoteEdit(chart, add, rem)`, `replaceNotes(chart, notes)`: no history, any chart. `myApplyNotes` calls `gSession->onNotesApplied`. |
 | `src/Managers/TempoMan` | `onRemoteTempoChanged(tempo)` (null = refresh all). |
@@ -70,7 +82,7 @@ Linux and Wine builds (no environment available), real LAN/internet.
 - Chart tempo that is removed remotely is cleared, never deleted (history
   entries may point at it).
 
-## Protocol v2
+## Protocol v3
 Frame: `[u32 size LE][u8 type][payload]`, size counts type+payload, max 64 MB.
 Payload via `WriteStream`/`ReadStream`; blobs = `writeNum(len)` + bytes; notes
 via `NoteList::encode(out,false)`. Host = id 0, guests 1.., `origin` is
@@ -78,8 +90,8 @@ overwritten by the host with the sender's connection id.
 
 | Type | Dir | Payload |
 |---|---|---|
-| 1 Hello | G→H | u32 magic `0x504D5641`, u16 version, str name, u64 audio hash, f64 length |
-| 2 Welcome | H→G | u8 ok, str reason, u32 guest id |
+| 1 Hello | G→H | u32 magic `0x504D5641`, u16 version, str name, u8 has song, u64 audio hash, f64 length |
+| 2 Welcome | H→G | u8 result (0 rejected, 1 ok, 2 download), str reason, u32 guest id; if 2: str folder, str music name, u64 music hash, u64 music size |
 | 3 FullState | H→G | blob meta, blob song tempo, u32 n, n × [u32 id, str style, blob props, blob tempo, notes] |
 | 4 PeerList | H→G | u32 n, n × [u32 id, str name] (host first) |
 | 5 NoteEdit | both | u32 origin, u32 chart, notes add, notes rem, u32 checksum |
@@ -87,7 +99,15 @@ overwritten by the host with the sender's connection id.
 | 7 State | both | u32 origin, u8 section, u32 id, blob data |
 | 8 Presence | both | u32 origin, u32 chart, u8 hover, f64 hover time, f64 hover x (noteskin units from receptor center), f64 cursor time |
 | 9 ResyncRequest | G→H | u32 chart |
-| 10 Disconnect | both | str reason |
+| 10 Disconnect | both | str reason (also used to kick) |
+| 11 Selection | both | u32 origin, u32 chart, i32 region begin, i32 region end, num n, n × [num row, u8 col] (sent ≤ 10/s, on change) |
+| 12 DownloadRequest | G→H | u8 need music (0 if the saves folder already has it) |
+| 13 FileData | H→G | u8 kind (0 music, 1 simfile, 2 image), str name, u64 size, u64 offset, num n, n bytes (1 MB chunks, in order) |
+| 14 DownloadDone | H→G | str simfile name (may be empty), str music name |
+
+A downloading guest is not "joined" on the host (not listed, gets no edits).
+The guest validates file names (plain names only, no separators/reserved
+characters), sizes (music ≤ 1 GB, others ≤ 32 MB) and chunk order.
 
 Section blobs: meta = 12 strings + f64 preview start/length + u8 selectable;
 tempo = u8 present, f64 offset, i32 display BPM type, f64×2 range,
@@ -125,6 +145,10 @@ Check: B's title/offset/charts become A's; edits on either side appear on both;
 moving the mouse shows a named cursor on the other side and a marker on the
 scrub bar; A's Ctrl+Z never removes B's notes; B's Ctrl+Z reverts B's edits on
 both. Start a third instance to check more than one guest.
+
+Download: start B with no song open, Join → B saves the song to
+`bin/saves/<folder>`, opens it and joins. Selection: Ctrl+A on B highlights
+the notes in B's color on A.
 
 ## Ideas for phase 3
 Chart creation/deletion sync, BG changes, IPv6, NAT traversal, hashing audio off

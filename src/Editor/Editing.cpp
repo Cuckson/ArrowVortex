@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <Core/Core.h>
+#include <Core/Gui.h>
 #include <Core/Input.h>
 #include <Core/StringUtils.h>
 #include <Core/Utils.h>
@@ -90,6 +91,12 @@ struct EditingImpl : public Editing {
     bool myUseUndoRedoJump;
     bool myUseTimeBasedCopy;
 
+    // Mouse mode.
+    bool myUseMouseMode;
+    PlacingNote myMouseNote;
+    int myMouseCol;
+    bool myIsMouseDeleting;
+
     EditingAnchor myVisualSyncAnchor;
     EditingAnchor myTempoEditAnchor;
     // ================================================================================================
@@ -106,6 +113,10 @@ struct EditingImpl : public Editing {
         myUseJumpToNextNote = false;
         myUseUndoRedoJump = true;
         myUseTimeBasedCopy = false;
+        myUseMouseMode = false;
+        myMouseNote.mode = PLACE_NONE;
+        myMouseCol = 0;
+        myIsMouseDeleting = false;
         myVisualSyncAnchor = EditingAnchor::CURSOR;
         myTempoEditAnchor = EditingAnchor::CURSOR;
     }
@@ -129,6 +140,7 @@ struct EditingImpl : public Editing {
             editing->get("useJumpToNextNote", &myUseJumpToNextNote);
             editing->get("useUndoRedoJumps", &myUseUndoRedoJump);
             editing->get("useTimeBasedCopy", &myUseTimeBasedCopy);
+            editing->get("useMouseMode", &myUseMouseMode);
 
             const char* vs = editing->get("anchorVisualSync");
             if (vs) myVisualSyncAnchor = ToEditingAnchor(vs);
@@ -143,6 +155,7 @@ struct EditingImpl : public Editing {
         editing->addAttrib("useJumpToNextNote", myUseJumpToNextNote);
         editing->addAttrib("useUndoRedoJumps", myUseUndoRedoJump);
         editing->addAttrib("useTimeBasedCopy", myUseTimeBasedCopy);
+        editing->addAttrib("useMouseMode", myUseMouseMode);
         editing->addAttrib("anchorVisualSync", ToString(myVisualSyncAnchor));
         editing->addAttrib("anchorTempoEdit", ToString(myTempoEditAnchor));
     }
@@ -293,9 +306,131 @@ struct EditingImpl : public Editing {
             gTempo->stopTweaking(evt.button == Mouse::LMB);
             evt.handled = true;
         }
+
+        if (!evt.handled && myUseMouseMode) onMouseModePress(evt);
     }
 
-    void onMouseRelease(MouseRelease& evt) override {}
+    void onMouseRelease(MouseRelease& evt) override {
+        if (evt.button == Mouse::LMB && myMouseNote.mode != PLACE_NONE) {
+            int row, col;
+            if (getMouseTarget(evt.x, evt.y, row, col, false)) {
+                myMouseNote.endRow = row;
+            }
+            finishNotePlacement(myMouseNote, myMouseCol);
+        }
+        if (evt.button == Mouse::RMB) myIsMouseDeleting = false;
+    }
+
+    // ================================================================================================
+    // EditingImpl :: mouse mode.
+
+    // Returns the snapped row and the closest column at the given mouse
+    // position. If needColumn is set, the mouse must be over the columns.
+    bool getMouseTarget(int x, int y, int& row, int& col, bool needColumn) {
+        if (gChart->isClosed()) return false;
+        int numCols = gStyle->getNumCols();
+        if (numCols <= 0) return false;
+
+        auto coords = gView->getReceptorCoords();
+        if (needColumn && (x < coords.xl || x >= coords.xr)) return false;
+
+        col = 0;
+        int best = INT_MAX;
+        for (int c = 0; c < numCols; ++c) {
+            int dist = abs(x - gView->columnToX(c));
+            if (dist < best) best = dist, col = c;
+        }
+
+        int endRow = gSimfile->getEndRow();
+        row = gView->offsetToRow(gView->yToOffset(y));
+        row = gView->snapRow(std::clamp(row, 0, endRow), View::SNAP_CLOSEST);
+        row = std::clamp(row, 0, endRow);
+        return true;
+    }
+
+    // Returns the note under the mouse: the closest note head, or otherwise
+    // a hold body under the mouse.
+    const ExpandedNote* getNoteUnderMouse(int x, int y) {
+        if (gChart->isClosed()) return nullptr;
+        int radius = gSystem->applyScaleFactor(gView->applyZoom(32));
+        int bestDist = radius * radius;
+        const ExpandedNote* head = nullptr;
+        const ExpandedNote* body = nullptr;
+        for (auto& note : *gNotes) {
+            int dx = x - gView->columnToX(note.col);
+            if (abs(dx) >= radius) continue;
+            int ny = gView->rowToY(note.row);
+            int dy = y - ny;
+            int dist = dx * dx + dy * dy;
+            if (dist < bestDist) {
+                bestDist = dist;
+                head = &note;
+            } else if (note.endrow > note.row) {
+                int ey = gView->rowToY(note.endrow);
+                if (y >= std::min(ny, ey) && y <= std::max(ny, ey)) {
+                    body = &note;
+                }
+            }
+        }
+        return head ? head : body;
+    }
+
+    bool removeNoteUnderMouse(int x, int y) {
+        const ExpandedNote* note = getNoteUnderMouse(x, y);
+        if (!note) return false;
+        static const NotesMan::EditDescription desc = {"Removed %1 note",
+                                                       "Removed %1 notes"};
+        NoteEdit edit;
+        edit.rem.append(CompressNote(*note));
+        gNotes->modify(edit, false, &desc);
+        return true;
+    }
+
+    void onMouseModePress(MousePress& evt) {
+        // Ctrl/alt + click keep the regular selection box.
+        if (evt.keyflags & (Keyflag::CTRL | Keyflag::ALT)) return;
+
+        if (evt.button == Mouse::LMB) {
+            int row, col;
+            if (!getMouseTarget(evt.x, evt.y, row, col, true)) return;
+            evt.handled = true;
+            if (gNotes->getNoteAt(row, col)) return;
+
+            uint32_t quant = gView->getSnapQuant();
+            if (evt.keyflags & Keyflag::SHIFT) {
+                NoteEdit edit;
+                edit.add.append({row, row, static_cast<uint32_t>(col),
+                                 static_cast<uint32_t>(myCurPlayer), NOTE_MINE,
+                                 quant});
+                gNotes->modify(edit, false, nullptr);
+                return;
+            }
+            // Dragging before releasing the button places a hold.
+            myMouseNote = {myCurPlayer, row, row, PLACE_NEW, quant};
+            myMouseCol = col;
+        } else if (evt.button == Mouse::RMB) {
+            if (removeNoteUnderMouse(evt.x, evt.y)) {
+                myIsMouseDeleting = true;
+                evt.handled = true;
+            }
+        }
+    }
+
+    void toggleMouseMode() override {
+        myUseMouseMode = !myUseMouseMode;
+        myMouseNote.mode = PLACE_NONE;
+        myIsMouseDeleting = false;
+        gMenubar->update(Menubar::USE_MOUSE_MODE);
+        if (myUseMouseMode) {
+            HudNote(
+                "Mouse mode: left click places notes, right click removes "
+                "them, ctrl + scroll changes the snap, +/- zooms.");
+        } else {
+            HudNote("Mouse mode disabled.");
+        }
+    }
+
+    bool hasMouseMode() override { return myUseMouseMode; }
 
     void onMouseScroll(MouseScroll& evt) override {
         int m = gTempo->getTweakMode();
@@ -314,6 +449,16 @@ struct EditingImpl : public Editing {
     }
 
     void onMouseMove(MouseMove& move) override {
+        // Remove the notes the mouse moves over while right click is held.
+        if (myIsMouseDeleting) {
+            if (gSystem->isMouseDown(Mouse::RMB)) {
+                vec2i mpos = gSystem->getMousePos();
+                removeNoteUnderMouse(mpos.x, mpos.y);
+            } else {
+                myIsMouseDeleting = false;
+            }
+        }
+
         if (gTempo->isInVisualSync()) {
             vec2i mpos = gSystem->getMousePos();
             ChartOffset offset = gView->yToOffset(mpos.y);
@@ -339,6 +484,10 @@ struct EditingImpl : public Editing {
     void finishNotePlacement(int col) {
         auto& pnote = myPlacingNotes[col];
         pnote.endRow = gView->getCursorRow();
+        finishNotePlacement(pnote, col);
+    }
+
+    void finishNotePlacement(PlacingNote& pnote, int col) {
         if (gChart->isOpen() && IsActive(pnote)) {
             Note note = PlacingNoteToNote(pnote, col);
 
@@ -1275,6 +1424,29 @@ struct EditingImpl : public Editing {
             if (IsActive(myPlacingNotes[col])) {
                 gNotefield->drawGhostNote(PlacingNoteToNote(pnote, col));
             }
+        }
+        if (!myUseMouseMode || GuiMain::isCapturingMouse()) return;
+
+        // Mouse mode: show the note that is being placed, or the note that
+        // would be placed by clicking.
+        vec2i mpos = gSystem->getMousePos();
+        int row, col;
+        if (myMouseNote.mode != PLACE_NONE) {
+            if (getMouseTarget(mpos.x, mpos.y, row, col, false)) {
+                myMouseNote.endRow = row;
+            }
+            gNotefield->drawGhostNote(
+                PlacingNoteToNote(myMouseNote, myMouseCol));
+        } else if (getMouseTarget(mpos.x, mpos.y, row, col, true) &&
+                   !gNotes->getNoteAt(row, col) &&
+                   !gSystem->isMouseDown(Mouse::LMB)) {
+            Note note = {row,
+                         row,
+                         static_cast<uint32_t>(col),
+                         static_cast<uint32_t>(myCurPlayer),
+                         NOTE_STEP_OR_HOLD,
+                         static_cast<uint32_t>(gView->getSnapQuant())};
+            gNotefield->drawHoverNote(note);
         }
     }
 

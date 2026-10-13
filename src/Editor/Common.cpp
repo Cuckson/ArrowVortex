@@ -38,6 +38,10 @@ const char* ToString(SnapType st) {
     return (st >= 0 && st < NUM_SNAP_TYPES) ? text[st] : text[0];
 }
 
+std::string FormatSnap(double snapsPerMeasure) {
+    return Str::val(snapsPerMeasure, 0, 2);
+}
+
 const std::string OrdinalSuffix(int i) {
     int j = i % 10, k = i % 100;
 

@@ -51,8 +51,7 @@ struct ViewImpl : public View, public InputHandler {
     bool myUseTimeBasedView = true;
     bool myUseReverseScroll = false;
     bool myUseChartPreview = false;
-    int myCustomSnap = 20;
-    int myCustomSnapSteps[193];
+    double myCustomSnap = 20;
     SnapType mySnapType = ST_NONE;
 
     // ================================================================================================
@@ -81,13 +80,12 @@ struct ViewImpl : public View, public InputHandler {
             view->get("receptorY", &myReceptorY);
             view->get("previewOffset", &myPreviewOffset);
 
-            myCustomSnap = std::clamp(myCustomSnap, 5, 191);
+            myCustomSnap = ClampCustomSnap(myCustomSnap);
             myZoomLevel = std::clamp(myZoomLevel, -2.0, 16.0);
             myScaleLevel = std::clamp(myScaleLevel, 1.0, 10.0);
         }
 
         updateScrollValues();
-        updateCustomSnapSteps();
     }
 
     void saveSettings(XmrNode& settings) override {
@@ -97,7 +95,7 @@ struct ViewImpl : public View, public InputHandler {
         view->addAttrib("useTimeBasedView", myUseTimeBasedView);
         view->addAttrib("useReverseScroll", myUseReverseScroll);
         view->addAttrib("useChartPreview", myUseChartPreview);
-        view->addAttrib("customSnap", static_cast<long>(myCustomSnap));
+        view->addAttrib("customSnap", myCustomSnap);
         view->addAttrib("zoomLevel", static_cast<long>(myZoomLevel));
         view->addAttrib("scaleLevel", static_cast<long>(myScaleLevel));
         view->addAttrib("receptorX", static_cast<long>(myReceptorX));
@@ -188,16 +186,51 @@ struct ViewImpl : public View, public InputHandler {
 
     double getScaleLevel() const override { return myScaleLevel; }
 
-    int getCustomSnap() const override { return myCustomSnap; }
+    double getCustomSnap() const override { return myCustomSnap; }
 
     SnapType getSnapType() const override { return mySnapType; }
 
     int getSnapQuant() override {
-        if (mySnapType == ST_CUSTOM) {
-            return myCustomSnap;
-        } else {
-            return 192 / sRowSnapTypes[mySnapType];
+        if (mySnapType != ST_CUSTOM) return 192 / sRowSnapTypes[mySnapType];
+
+        // A decimal snap repeats after a number of measures; use the smallest
+        // per-measure grid that contains every snap position.
+        for (int n = 1; n <= 192; ++n) {
+            double perMeasure = myCustomSnap * n;
+            double rounded = std::round(perMeasure);
+            if (rounded > 192.0) break;
+            if (std::abs(perMeasure - rounded) < 1e-6) {
+                return static_cast<int>(rounded);
+            }
         }
+        return 192;
+    }
+
+    double getSnapsPerMeasure() override {
+        if (mySnapType == ST_CUSTOM) return myCustomSnap;
+        return 192.0 / sRowSnapTypes[mySnapType];
+    }
+
+    // Custom snaps have a precision of two decimals.
+    static double ClampCustomSnap(double snap) {
+        snap = std::round(snap * 100.0) / 100.0;
+        return std::clamp(snap, 1.0, 192.0);
+    }
+
+    // Returns the row of the n-th custom snap position. The positions are
+    // spaced evenly from row zero, so decimal snaps continue across measures.
+    int customSnapRow(int64_t n) const {
+        return static_cast<int>(
+            std::round(static_cast<double>(n) * 192.0 / myCustomSnap));
+    }
+
+    // Returns the index of the last custom snap position on or before row.
+    int64_t customSnapIndexBefore(int row) const {
+        auto n = static_cast<int64_t>(
+            std::floor(static_cast<double>(row) * myCustomSnap / 192.0));
+        while (customSnapRow(n + 1) <= row) ++n;
+        while (customSnapRow(n) > row) --n;
+        return n;
     }
 
     bool isTimeBased() const override { return myUseTimeBasedView; }
@@ -321,13 +354,6 @@ struct ViewImpl : public View, public InputHandler {
         }
     }
 
-    void updateCustomSnapSteps() {
-        double inc = 192.0 / myCustomSnap;
-        for (int i = 0; i <= myCustomSnap; ++i) {
-            myCustomSnapSteps[i] = static_cast<int>(std::round(inc * i));
-        }
-    }
-
     void toggleReverseScroll() override {
         myUseReverseScroll = !myUseReverseScroll;
         myReceptorY = rect_.h - myReceptorY;
@@ -370,25 +396,26 @@ struct ViewImpl : public View, public InputHandler {
         if (type > NUM_SNAP_TYPES - 1) type = 0;
         if (mySnapType != type) {
             mySnapType = static_cast<SnapType>(type);
-            HudNote("Snap: %s", ToString(mySnapType));
+            if (mySnapType == ST_CUSTOM) {
+                HudNote("Snap: Custom (%s)", FormatSnap(myCustomSnap).c_str());
+            } else {
+                HudNote("Snap: %s", ToString(mySnapType));
+            }
         }
     }
 
-    void setCustomSnap(int size) override {
-        if (size < 4) size = 4;
-        if (size > 192) size = 192;
+    void setCustomSnap(double size) override {
+        size = ClampCustomSnap(size);
         // If the custom snap is a non-custom value, set the snap to that value
         // instead
-        for (int i = 0; i < ST_CUSTOM; i++) {
-            if (192 / sRowSnapTypes[i] == size) {
+        for (int i = ST_4TH; i < ST_CUSTOM; i++) {
+            if (192.0 / sRowSnapTypes[i] == size) {
                 setSnapType(i);
                 return;
             }
         }
-        if (myCustomSnap != size) {
+        if (myCustomSnap != size || mySnapType != ST_CUSTOM) {
             myCustomSnap = size;
-            updateCustomSnapSteps();
-            HudNote("Custom Snap: %s", OrdinalSuffix(myCustomSnap).c_str());
             setSnapType(ST_CUSTOM);
         }
     }
@@ -638,23 +665,9 @@ struct ViewImpl : public View, public InputHandler {
 
             // Custom snaps
             if (mySnapType == ST_CUSTOM) {
-                int measure = row / 192, measurerow = row % 192;
-                if (dir == SNAP_UP) {
-                    for (int i = myCustomSnap; i >= 0; --i) {
-                        if (myCustomSnapSteps[i] <= measurerow) {
-                            measurerow = myCustomSnapSteps[i];
-                            break;
-                        }
-                    }
-                } else {
-                    for (int i = 0; i <= myCustomSnap; ++i) {
-                        if (myCustomSnapSteps[i] >= measurerow) {
-                            measurerow = myCustomSnapSteps[i];
-                            break;
-                        }
-                    }
-                }
-                row = measure * 192 + measurerow;
+                int64_t n = customSnapIndexBefore(row);
+                if (dir != SNAP_UP && customSnapRow(n) < row) ++n;
+                row = customSnapRow(n);
             } else  // Regular case, snap is divisible by 192.
             {
                 int snap = sRowSnapTypes[mySnapType];
@@ -671,9 +684,7 @@ struct ViewImpl : public View, public InputHandler {
 
         // Special case, custom snapping.
         if (snap == 0) {
-            return std::find(myCustomSnapSteps,
-                             myCustomSnapSteps + myCustomSnap,
-                             row % 192) != myCustomSnapSteps + myCustomSnap;
+            return customSnapRow(customSnapIndexBefore(row)) == row;
         }
 
         return (row % snap == 0);

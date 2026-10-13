@@ -2,6 +2,8 @@
 
 #include <Editor/Common.h>
 
+#include <vector>
+
 namespace Vortex {
 
 struct Notefield {
@@ -19,6 +21,17 @@ struct Notefield {
     virtual void draw() = 0;
 
     virtual void drawGhostNote(const Note& n) = 0;
+
+    /// Draws a faint preview of a note, e.g. the note under the mouse.
+    virtual void drawHoverNote(const Note& n) = 0;
+
+    /// Draws the receptor outlines of another user at the given y-position.
+    virtual void drawPeerReceptors(int y, uint32_t color) = 0;
+
+    /// Draws selection boxes in the given color over the notes at the given
+    /// positions (row, column) of the open chart.
+    virtual void drawPeerSelection(const std::vector<RowCol>& notes,
+                                   uint32_t color) = 0;
 
     virtual void toggleShowWaveform() = 0;
     virtual void toggleShowBeatLines() = 0;

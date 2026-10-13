@@ -14,7 +14,9 @@
 
 #include <Editor/Common.h>
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 #include <stdlib.h>
 #include <stdint.h>
 
@@ -438,31 +440,15 @@ static void EncodeNote(WriteStream& out, const Note& in,
     }
 }
 
-// If we are outputting something marked as a non-standard quantization,
-// adjust it to align with the expected custom snap.
-static void ApplyQuantOffset(Note& out, int offsetRows) {
-    int startingOffset = (out.row - offsetRows) % 192;
-    int endingOffset = out.row % 192;
-    int endingRowOffset = out.endrow % 192;
-    if (out.quant == 0 || out.quant > 192) {
-        out.quant = 192;
-        HudError("Bug: Missing quantization label for note at %i", out.row);
-    }
-    // Use the starting row to shift basis to the correct one
-    // get quant-based index of starting note/offset: round(endingOffset /
-    // 192.0f * out.quant) recalculate the position in the measure of the quant:
-    // (int) round(192.0f / out.quant * (above) then make this the new measure
-    // offset
-    if (192 % out.quant > 0 && startingOffset != endingOffset) {
-        out.row = out.row - endingOffset +
-                  static_cast<int>(std::round(
-                      192.0f / out.quant *
-                      std::round(endingOffset / 192.0f * out.quant)));
-        out.endrow = out.endrow - endingRowOffset +
-                     static_cast<int>(std::round(
-                         192.0f / out.quant *
-                         std::round(endingRowOffset / 192.0f * out.quant)));
-    }
+// Moves a row to the closest position of a quantization grid with the given
+// number of evenly spaced positions per measure.
+static int SnapToQuant(int row, int quant) {
+    int measure = row >= 0 ? row / 192 : (row - 191) / 192;
+    int offset = row - measure * 192;
+    double step = 192.0 / quant;
+    int snapped = static_cast<int>(
+        std::round(std::round(static_cast<double>(offset) / step) * step));
+    return measure * 192 + snapped;
 }
 
 static void DecodeNote(ReadStream& in, Note& out, int offsetRows) {
@@ -480,13 +466,11 @@ static void DecodeNote(ReadStream& in, Note& out, int offsetRows) {
         out.type = v & 0xF;
         out.quant = in.read<uint8_t>();
     }
-    ApplyQuantOffset(out, offsetRows);
 }
 
 static void DecodeNote(ReadStream& in, Note& out, TempoRowTracker& tracker,
                        double offsetTime) {
     uint8_t col = in.read<uint8_t>();
-    int offsetRows = tracker.lookAhead(offsetTime);
     if ((col & 0x80) == 0) {
         double time = in.read<double>() + offsetTime;
         int row = tracker.advance(time);
@@ -497,13 +481,12 @@ static void DecodeNote(ReadStream& in, Note& out, TempoRowTracker& tracker,
         double time = in.read<double>() + offsetTime;
         out.row = tracker.advance(time);
         double endTime = in.read<double>() + offsetTime;
-        out.endrow = tracker.lookAhead(time);
+        out.endrow = std::max(out.row, tracker.lookAhead(endTime));
         uint32_t v = in.read<uint8_t>();
         out.player = v >> 4;
         out.type = v & 0xF;
         out.quant = in.read<uint8_t>();
     }
-    ApplyQuantOffset(out, offsetRows);
 }
 
 void NoteList::encode(WriteStream& out, bool removeOffset) const {
@@ -552,6 +535,37 @@ void NoteList::decode(ReadStream& in, const TimingData& timing,
         DecodeNote(in, note, tracker, offsetTime);
         append(note);
     }
+}
+
+void NoteList::snapToQuantization() {
+    if (myNum == 0) return;
+
+    for (int i = 0; i < myNum; ++i) {
+        Note& note = myNotes[i];
+        if (note.quant == 0 || note.quant > 192) note.quant = 192;
+        if (192 % note.quant == 0) continue;
+        int row = SnapToQuant(note.row, static_cast<int>(note.quant));
+        int endrow = SnapToQuant(note.endrow, static_cast<int>(note.quant));
+        note.row = std::max(0, row);
+        note.endrow = std::max(note.row, endrow);
+    }
+
+    // Snapping can change the order of the notes, or make them overlap.
+    std::stable_sort(
+        myNotes, myNotes + myNum, [](const Note& a, const Note& b) {
+            return a.row < b.row || (a.row == b.row && a.col < b.col);
+        });
+    std::vector<int> endrows;
+    for (int i = 0; i < myNum; ++i) {
+        Note& note = myNotes[i];
+        if (note.col >= endrows.size()) endrows.resize(note.col + 1, -1);
+        if (note.row <= endrows[note.col]) {
+            note.row = -1;
+        } else {
+            endrows[note.col] = note.endrow;
+        }
+    }
+    cleanup();
 }
 
 // ================================================================================================
