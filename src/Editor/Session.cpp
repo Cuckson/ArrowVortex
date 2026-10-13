@@ -14,7 +14,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_mouse.h>
+#include <SDL3/SDL_stdinc.h>
 
 #include <Core/ByteStream.h>
 #include <Core/Draw.h>
@@ -244,8 +246,19 @@ static std::string SafeFolderName(const std::string& name) {
     return out.empty() ? std::string("song") : out;
 }
 
+// Downloaded songs go next to the executable, like the settings. When that is
+// read-only (e.g. a system-wide install on Linux), the user's data folder is
+// used instead.
 static fs::path SavesDir() {
-    return utf8ToPath(gSystem->getRunDir()) / "saves";
+    fs::path dir = utf8ToPath(gSystem->getRunDir()) / "saves";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (!ec) return dir;
+    char* pref = SDL_GetPrefPath(nullptr, "ArrowVortex");
+    if (!pref) return dir;
+    fs::path out = utf8ToPath(pref) / "saves";
+    SDL_free(pref);
+    return out;
 }
 
 static bool IsSimfileName(const std::string& name) {

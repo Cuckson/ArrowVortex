@@ -131,7 +131,12 @@ col|player|type|quant.
   matching `msvcp140.dll`; Wine's builtin (and old redistributables) crash on
   the first lock. Fixed with `_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR`.
 - **Linux**: share address uses `getifaddrs` (was showing 127.0.0.1 only);
-  `send` uses `MSG_NOSIGNAL`. Allow the port in the firewall (ufw/firewalld).
+  `send` uses `MSG_NOSIGNAL`; `EINTR` from `select`/`send`/`recv`/`connect`
+  is treated as "try again" instead of a dropped connection; socket errors
+  are reported with `strerror`. Editor links `Threads::Threads`. Downloaded
+  songs fall back to `SDL_GetPrefPath` (`~/.local/share/ArrowVortex/saves`)
+  when the folder next to the executable isn't writable (system-wide install).
+  Allow the port in the firewall (ufw/firewalld).
 
 ## Build notes
 - Build: VS 18 vcvars64 + ninja (`ninja` builds all incl. `format` check).

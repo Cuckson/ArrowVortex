@@ -41,15 +41,20 @@ static int LastError() { return WSAGetLastError(); }
 static bool IsWouldBlock(int err) {
     return err == WSAEWOULDBLOCK || err == WSAEINPROGRESS;
 }
+static bool IsInterrupted(int err) { return err == WSAEINTR; }
 static void CloseNative(NativeSocket s) { closesocket(s); }
 #else
 typedef int NativeSocket;
 typedef socklen_t SockLen;
 static const uintptr_t INVALID_HANDLE = ~static_cast<uintptr_t>(0);
 static int LastError() { return errno; }
+// A signal interrupting a call (EINTR) is treated like a call that would
+// block; the socket is simply polled again.
 static bool IsWouldBlock(int err) {
-    return err == EWOULDBLOCK || err == EAGAIN || err == EINPROGRESS;
+    return err == EWOULDBLOCK || err == EAGAIN || err == EINPROGRESS ||
+           err == EINTR;
 }
+static bool IsInterrupted(int err) { return err == EINTR; }
 static void CloseNative(NativeSocket s) { ::close(s); }
 #endif
 
@@ -65,8 +70,16 @@ static uintptr_t FromNative(NativeSocket s) {
 #endif
 }
 
+static std::string ErrorText(int err) {
+#ifdef _WIN32
+    return "error " + std::to_string(err);
+#else
+    return std::string(std::strerror(err));
+#endif
+}
+
 static std::string ErrorText(const char* what) {
-    return std::string(what) + " (error " + std::to_string(LastError()) + ")";
+    return std::string(what) + " (" + ErrorText(LastError()) + ")";
 }
 
 // ================================================================================================
@@ -164,7 +177,7 @@ bool NetSocket::pollAll(std::vector<PollItem>& items, int timeoutMs) {
     int res =
         select(any ? maxSocket + 1 : 0, &readSet, &writeSet, &errorSet, &tv);
 #endif
-    if (res < 0) return false;
+    if (res < 0) return IsInterrupted(LastError());
 
     for (auto& item : items) {
         if (item.result != 0) continue;
@@ -300,7 +313,7 @@ bool NetSocket::finishConnect(std::string& error) {
     getsockopt(ToNative(myHandle), SOL_SOCKET, SO_ERROR,
                reinterpret_cast<char*>(&err), &len);
     if (err != 0) {
-        error = "Could not connect (error " + std::to_string(err) + ")";
+        error = "Could not connect (" + ErrorText(err) + ")";
         return false;
     }
     return true;
@@ -334,7 +347,7 @@ int NetSocket::poll(bool wantWrite, int timeoutMs) const {
 #else
     int res = select(s + 1, &readSet, &writeSet, &errorSet, &tv);
 #endif
-    if (res < 0) return POLL_ERROR;
+    if (res < 0) return IsInterrupted(LastError()) ? 0 : POLL_ERROR;
 
     int flags = 0;
     if (FD_ISSET(s, &readSet)) flags |= POLL_READ;

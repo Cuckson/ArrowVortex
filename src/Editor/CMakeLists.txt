@@ -65,4 +65,8 @@ target_link_directories(Editor PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(Editor PRIVATE Core Dialogs MAD::MAD Managers Simfile System Aubio::aubio iir::iir_static Vorbis::vorbisfile Vorbis::vorbis Ogg::ogg ${FFMPEG_LIBRARIES} SDL3::SDL3)
 if(WIN32)
     target_link_libraries(Editor PRIVATE ws2_32)
+else()
+    # The multiplayer session runs its sockets on a std::jthread.
+    find_package(Threads REQUIRED)
+    target_link_libraries(Editor PRIVATE Threads::Threads)
 endif()
