@@ -26,6 +26,17 @@ class NetSocket {
     /// Returns the IPv4 addresses of this machine (excluding loopback).
     static std::vector<std::string> localAddresses();
 
+    /// A socket to wait on with pollAll().
+    struct PollItem {
+        const NetSocket* socket = nullptr;
+        bool wantWrite = false;
+        int result = 0;  ///< Combination of PollFlags, set by pollAll().
+    };
+
+    /// Waits up to timeoutMs for any of the sockets to become readable (or
+    /// writable, if requested). Returns false if waiting failed.
+    static bool pollAll(std::vector<PollItem>& items, int timeoutMs);
+
     ~NetSocket();
     NetSocket();
     NetSocket(NetSocket&& other) noexcept;

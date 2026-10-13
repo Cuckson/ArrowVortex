@@ -45,8 +45,9 @@ struct History : public InputHandler {
 
     virtual bool hasUnsavedChanges() const = 0;
 
-    /// Removes all entries, keeping the unsaved changes state. Used when the
-    /// chart is changed by a co-editing session, which invalidates the diffs.
+    /// Removes all entries, keeping the unsaved changes state. Used when a
+    /// co-editing session replaces the simfile data, which invalidates the
+    /// diffs.
     virtual void clearAll() = 0;
 
     /// Marks the file as having unsaved changes that were made outside of the

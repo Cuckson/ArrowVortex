@@ -2,6 +2,11 @@
 
 #include <math.h>
 
+#include <algorithm>
+#include <climits>
+#include <string>
+#include <vector>
+
 #include <Core/Utils.h>
 
 #include <System/Debug.h>
@@ -9,11 +14,13 @@
 
 #include <Core/Draw.h>
 #include <Core/Renderer.h>
+#include <Core/Text.h>
 
 #include <Editor/Common.h>
 #include <Editor/Editor.h>
 #include <Editor/Menubar.h>
 #include <Editor/Selection.h>
+#include <Editor/Session.h>
 #include <Editor/TextOverlay.h>
 #include <Editor/View.h>
 
@@ -420,6 +427,63 @@ struct MinimapImpl : public Minimap {
         Renderer::drawQuads(NUM_PIECES, vp, myUvs);
 
         Renderer::popScissorRect();
+
+        drawPeers(rect);
+    }
+
+    // Returns the minimap y-position of a song time.
+    int timeToMapY(const recti& chartRect, double time) const {
+        double range = myChartEndOfs - myChartBeginOfs;
+        if (range <= 0.0) return chartRect.y;
+        double t = (gView->timeToOffset(time) - myChartBeginOfs) / range;
+        t = std::clamp(t, 0.0, 1.0);
+        if (gView->hasReverseScroll()) t = 1.0 - t;
+        return chartRect.y + static_cast<int>(t * chartRect.h + 0.5);
+    }
+
+    // Marks where the other users of a co-editing session are hovering, or
+    // where their cursor is when they are not hovering over the notefield.
+    void drawPeers(const recti& chartRect) {
+        if (!gSession || myNotesH <= 0) return;
+        const auto& peers = gSession->getPeers();
+        if (peers.empty()) return;
+
+        struct Label {
+            int y;
+            const Session::Peer* peer;
+        };
+        std::vector<Label> labels;
+        int markerH = std::max(2, gSystem->applyScaleFactor(2));
+        for (const auto& peer : peers) {
+            double time = peer.hasHover ? peer.hoverTime : peer.viewTime;
+            int y = timeToMapY(chartRect, time);
+            uint32_t color = Color32a(peer.color, peer.onChart ? 230 : 110);
+            Draw::fill({rect_.x - 3, y - markerH / 2, rect_.w + 6, markerH},
+                       color);
+            labels.push_back({y, &peer});
+        }
+
+        // Stack the names to the left of the minimap, without overlap.
+        std::sort(labels.begin(), labels.end(),
+                  [](const Label& a, const Label& b) { return a.y < b.y; });
+        TextStyle style;
+        style.textFlags = Text::SINGLE_LINE;
+        int pad = gSystem->applyScaleFactor(3);
+        int lastBottom = INT_MIN;
+        for (const auto& label : labels) {
+            const auto* peer = label.peer;
+            std::string name = peer->name;
+            if (!peer->onChart) name += " (other chart)";
+            Text::arrange(Text::ML, style, name.c_str());
+            vec2i size = Text::getSize();
+            int h = size.y + pad;
+            int y = std::max(label.y - h / 2, lastBottom + 1);
+            int w = size.x + pad * 2;
+            recti box = {rect_.x - 6 - w, y, w, h};
+            Draw::fill(box, Color32a(peer->color, peer->onChart ? 150 : 80));
+            Text::draw(recti{box.x + pad, box.y, size.x, box.h});
+            lastBottom = y + h;
+        }
     }
 
     void setMode(Mode mode) override {

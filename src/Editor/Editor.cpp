@@ -260,7 +260,7 @@ struct EditorImpl : public Editor, public InputHandler {
         Statusbar::create(settings);
         Minimap::create();
         Menubar::create();
-        Session::create();
+        Session::create(settings);
         gSystem->createMenu();
 
         // Load the editor logo.
@@ -289,6 +289,7 @@ struct EditorImpl : public Editor, public InputHandler {
         gView->saveSettings(settings);
         gMusic->saveSettings(settings);
         gNoteskin->saveSettings(settings);
+        gSession->saveSettings(settings);
         saveDialogSettings(settings);
 
         // Destroy the gui context first, because some dialogs refer to editor
@@ -1061,6 +1062,7 @@ struct EditorImpl : public Editor, public InputHandler {
 
         if (gSimfile->isOpen()) {
             gNotefield->draw();
+            gSession->drawCursors();
             gMinimap->draw();
             gStatusbar->draw();
         } else {

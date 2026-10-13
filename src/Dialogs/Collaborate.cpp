@@ -14,6 +14,7 @@ DialogCollaborate::~DialogCollaborate() = default;
 
 DialogCollaborate::DialogCollaborate() {
     myPort = std::to_string(Session::DEFAULT_PORT);
+    myName = gSession->getUserName();
     setTitle("COLLABORATE");
     myCreateWidgets();
 }
@@ -23,6 +24,13 @@ void DialogCollaborate::myCreateWidgets() {
     myLayout.add<WgLabel>()->text.bind(&myStatus);
 
     myLayout.row().col(64).col(176).col(72);
+
+    WgLineEdit* name = myLayout.add<WgLineEdit>("Name");
+    name->text.bind(&myName);
+    name->setMaxLength(Session::MAX_NAME_LENGTH);
+    name->onChange.bind(this, &DialogCollaborate::onNameChanged);
+    name->setTooltip("Your name, shown to the other users next to your cursor");
+    myLayout.addBlank();
 
     WgLineEdit* port = myLayout.add<WgLineEdit>("Port");
     port->text.bind(&myPort);
@@ -51,7 +59,9 @@ void DialogCollaborate::myCreateWidgets() {
     WgButton* joinButton = myLayout.add<WgButton>();
     joinButton->text.set("Join");
     joinButton->onPress.bind(this, &DialogCollaborate::onJoin);
-    joinButton->setTooltip("Join a session; the same song must be open");
+    joinButton->setTooltip(
+        "Join a session; the same music must be open. Your simfile is "
+        "replaced by the host's");
 
     myLayout.row().col(320);
     WgButton* disconnect = myLayout.add<WgButton>();
@@ -65,13 +75,19 @@ void DialogCollaborate::onTick() {
     EditorDialog::onTick();
 }
 
+void DialogCollaborate::onNameChanged() { gSession->setUserName(myName); }
+
 void DialogCollaborate::onHost() {
+    gSession->setUserName(myName);
     int port = std::atoi(myPort.c_str());
     if (port <= 0 || port > 65535) port = Session::DEFAULT_PORT;
     gSession->host(port);
 }
 
-void DialogCollaborate::onJoin() { gSession->join(myJoinAddress); }
+void DialogCollaborate::onJoin() {
+    gSession->setUserName(myName);
+    gSession->join(myJoinAddress);
+}
 
 void DialogCollaborate::onCopy() {
     std::string address = gSession->getShareAddress();

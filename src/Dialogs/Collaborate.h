@@ -19,7 +19,9 @@ class DialogCollaborate : public EditorDialog {
     void onJoin();
     void onCopy();
     void onDisconnect();
+    void onNameChanged();
 
+    std::string myName;
     std::string myPort;
     std::string myJoinAddress;
     std::string myShareAddress;

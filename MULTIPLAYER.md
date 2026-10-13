@@ -1,97 +1,131 @@
-# Multiplayer / co-editing (phase 1) — implementation notes
+# Multiplayer / co-editing (phase 2) — implementation notes
 
-Compact reference for future work. Phase 1 status: implemented, builds clean
-(clang-tidy + clang-format pass). Socket layer loopback-tested; full two-instance
-GUI flow not yet verified at runtime.
+Compact reference for future work. Phase 2 status: implemented, builds clean
+(clang-tidy + clang-format pass). Verified at runtime on Windows with two real
+instances plus scripted protocol clients (join, full-state adoption, note /
+tempo / metadata / chart property sync both ways, guest undo, host undo not
+touching guest notes, presence + cursor rendering, late joiners). Not verified:
+Linux and Wine builds (no environment available), real LAN/internet.
 
 ## Scope
-- 1 host + 1 guest, direct TCP (no server, no NAT traversal; LAN / port forward /
-  Tailscale / ZeroTier). Default port 7654.
-- Each side has its own simfile copy; only **notes of the host's current chart** sync.
-- Not synced: tempo/timing, chart/song properties, chart creation. No chat/cursors.
+- 1 host + up to 16 guests, direct TCP (no server, no NAT traversal; LAN / port
+  forward / Tailscale / ZeroTier). Default port 7654. The host relays everything.
+- Join requires the same music file (FNV-1a hash + decoded length). On join the
+  guest's simfile is **replaced by the host's**: metadata, song timing, chart
+  list (style, difficulty, meter, step artist, split timing, notes). Join is
+  refused if the guest has unsaved changes.
+- Everyone can edit everything that is synced, on any chart:
+  notes, song timing (offset, BPM, stops, delays, warps, time signatures,
+  ticks, combos, speeds, scrolls, fakes, labels, display BPM, attacks), chart
+  split timing, chart properties (step artist, difficulty, meter), song
+  metadata (title/subtitle/artist + translits, genre, credit, banner,
+  background, CD title, lyrics path, preview, selectable).
+- Not synced: music path, BG/FG changes, chart creation/deletion. Charts the
+  host adds mid-session are only sent to guests that join later; charts a guest
+  adds stay local.
+- Each user has a name (Collaborate dialog, saved in settings.txt `session`).
+  Other users' mouse cursors are drawn over the notefield (semi-translucent
+  arrow + name) when they are on the same chart, and marked on the minimap
+  (scrub bar) with their name (hover position, or cursor position if not
+  hovering; dimmed "(other chart)" if on another chart).
 
 ## Files
 | File | Role |
 |---|---|
-| `src/Editor/NetSocket.{h,cpp}` | Non-blocking IPv4 TCP wrapper (Winsock / POSIX `#ifdef`). `listen`, `beginConnect`/`finishConnect`, `accept`, `poll` (select), `send`/`recv` (0 = would block, -1 = closed/error), `localAddresses`. |
-| `src/Editor/Session.{h,cpp}` | `gSession`. Protocol, `NetLink` worker thread, `SessionImpl` host/guest state machine, song check, chart id, checksum. |
-| `src/Dialogs/Collaborate.{h,cpp}` | `DialogCollaborate` ("COLLABORATE"): status, Port+Host, Share+Copy, Join+Join, Disconnect. |
-| `src/Managers/NoteMan.{h,cpp}` | Hooks + `applyRemoteEdit(add, rem)`, `replaceNotes(notes)` (no history; keeps selection). |
-| `src/Editor/History.{h,cpp}` | `clearAll()` (keeps unsaved flag), `markExternalChange()`; Ctrl+Z/Y blocked when `gSession->blocksUndo()`. |
-| Registration | `Action::OPEN_DIALOG_COLLABORATE` (Action.h/.cpp, Shortcuts.cpp name table), `DIALOG_COLLABORATE` (Dialog.h, Dialog.cpp id `"collaborate"`), Editor.cpp (factory, `Session::create/destroy`, `gSession->tick()` at start of `Editor::tick()`, `gSession->onChanges()` in `notifyChanges()`), Menubar File → "Collaborate...", `bin/settings/shortcuts.txt` Shift+K. |
-| CMake | Files added to `src/Editor/CMakeLists.txt` / `src/Dialogs/CMakeLists.txt`; Editor links `ws2_32` on WIN32. |
+| `src/Editor/NetSocket.{h,cpp}` | Non-blocking IPv4 TCP (Winsock / POSIX). `pollAll` (select over many sockets), `localAddresses` (getifaddrs on POSIX, since the host name resolves to 127.0.1.1 on most Linux distros). Windows uses `SO_EXCLUSIVEADDRUSE`. |
+| `src/Editor/Session.{h,cpp}` | `gSession`. Protocol, `NetLink` worker thread, `SessionImpl`, serialization, cursor drawing. |
+| `src/Dialogs/Collaborate.{h,cpp}` | "COLLABORATE": status, Name, Port+Host, Share+Copy, Join+Join, Disconnect. |
+| `src/Editor/Minimap.cpp` | `drawPeers()`: scrub-bar markers and stacked name tags. |
+| `src/Managers/NoteMan` | `applyRemoteEdit(chart, add, rem)`, `replaceNotes(chart, notes)`: no history, any chart. `myApplyNotes` calls `gSession->onNotesApplied`. |
+| `src/Managers/TempoMan` | `onRemoteTempoChanged(tempo)` (null = refresh all). |
+| `src/Managers/SimfileMan` | `getForRemoteEdit()`, `onRemoteChartsChanged(open, reload)` (sorts, keeps the open chart). |
+| `CMakeLists.txt` | `_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR` on Windows (see Wine below). |
 
-## Hook points (key to the design)
-- All note edits go through `NotesManImpl::modify()` → after `prepareEdit`, if
-  `gSession->isGuest()` → `gSession->forwardEdit(result.add, result.rem)` and return
-  (guest never applies locally, never creates history).
-- All note applies (edit/undo/redo) go through `NotesManImpl::myApplyNotes()` →
-  after sanitize calls `gSession->onNotesApplied(chart, add, rem)` → host broadcasts.
-- `insertRows()` refused on guest.
-- Host applies guest edits with `gNotes->modify(edit, false, &GuestEditDesc)` → normal
-  history entry ("Guest edited N notes").
+## Sync model
+- **Chart ids**: the host numbers its charts (`myChartIds`, Chart* → u32) and
+  sends them in the full state; guests map the same ids onto their (replaced)
+  charts. All note/section messages use ids, so chart re-sorting is harmless.
+- **Notes (operations)**: every local edit/undo/redo goes through
+  `myApplyNotes` → `onNotesApplied` → `NOTE_EDIT(origin, chart, add, rem,
+  checksum)`. Guests apply locally first and count it as pending; the host
+  applies guest edits with `applyRemoteEdit` (**no history**, so host Ctrl+Z
+  only reverts the host's own edits) and relays to all guests including the
+  sender (= ack). A guest compares the host checksum once it has no pending
+  edits for that chart and sends `RESYNC_REQUEST` on mismatch (host replies
+  with `NOTE_REPLACE`). Changes that bypass `myApplyNotes` (insert rows) are
+  caught in `onChanges` by comparing each chart's checksum with the last known
+  one and sent as `NOTE_REPLACE`.
+- **Everything else (sections)**: `SONG_META(0)`, `TEMPO(0 = song, id = chart
+  split timing)`, `CHART_PROPS(id)`. On relevant change flags the session
+  serializes all sections and sends those whose FNV hash changed (flushed at the
+  start of `tick`, before incoming messages). Last writer on the host wins: the
+  host applies, then broadcasts its own version to everyone *including the
+  sender*. A guest ignores incoming versions of a section while it has pending
+  (unechoed) sends for it, and on the last echo applies the host's version if
+  it differs → all peers converge. After applying, the local re-serialization's
+  hash is stored, so nothing echoes back.
+- Remote changes call `History::markExternalChange()`. Local history is kept
+  through and after the session; diffs are applied tolerantly (notes by
+  row/col, segments by row) on top of others' changes.
+- Chart tempo that is removed remotely is cleared, never deleted (history
+  entries may point at it).
 
-## Undo model
-- Host history = single linear log of authoritative chart; host can undo anything,
-  results are broadcast.
-- Guest: undo/redo disabled during session; history cleared on join (SongCheck ok)
-  and on session end; remote changes call `markExternalChange()` (title `*`).
-- Join refused if guest `hasUnsavedChanges()`.
-
-## Protocol v1
-Frame: `[u32 size LE][u8 type][payload]`, size counts type+payload, max 16 MB.
-Payload via `WriteStream`/`ReadStream` (native LE); note lists via `NoteList::encode(out,false)` / `decode(in,0)`.
+## Protocol v2
+Frame: `[u32 size LE][u8 type][payload]`, size counts type+payload, max 64 MB.
+Payload via `WriteStream`/`ReadStream`; blobs = `writeNum(len)` + bytes; notes
+via `NoteList::encode(out,false)`. Host = id 0, guests 1.., `origin` is
+overwritten by the host with the sender's connection id.
 
 | Type | Dir | Payload |
 |---|---|---|
-| 1 Hello | G→H | u32 magic `0x504D5641` ("AVMP"), u16 version, SongInfo |
-| 2 SongCheck | H→G | u8 ok, str reason |
-| 3 ChartSnapshot | H→G | u32 chartGen, u8 hasChart, [str styleId, i32 difficulty, i32 index-among-same-style+diff, notes], u32 checksum |
-| 4 NoteAdd / 5 NoteRemove | both | u32 chartGen, u8 flags (`EDIT_MORE_FOLLOWS`=1), notes, u32 checksum (guest sends 0) |
-| 6 Disconnect | both | str reason |
-| 7 ResyncRequest | G→H | empty (host replies with snapshot) |
+| 1 Hello | G→H | u32 magic `0x504D5641`, u16 version, str name, u64 audio hash, f64 length |
+| 2 Welcome | H→G | u8 ok, str reason, u32 guest id |
+| 3 FullState | H→G | blob meta, blob song tempo, u32 n, n × [u32 id, str style, blob props, blob tempo, notes] |
+| 4 PeerList | H→G | u32 n, n × [u32 id, str name] (host first) |
+| 5 NoteEdit | both | u32 origin, u32 chart, notes add, notes rem, u32 checksum |
+| 6 NoteReplace | both | u32 origin, u32 chart, notes, u32 checksum |
+| 7 State | both | u32 origin, u8 section, u32 id, blob data |
+| 8 Presence | both | u32 origin, u32 chart, u8 hover, f64 hover time, f64 hover x (noteskin units from receptor center), f64 cursor time |
+| 9 ResyncRequest | G→H | u32 chart |
+| 10 Disconnect | both | str reason |
 
-SongInfo: u64 FNV-1a of music file bytes, f64 duration (`gMusic->getSongLength()`,
-requires `getSamples().isCompleted()`), str title, str artist, f64 offset
-(`simfile->tempo->offset`). Tolerances: duration 1 ms, offset 0.1 ms.
-
-Compound edits: NoteRemove(MORE_FOLLOWS) + NoteAdd → combined into one `modify()`.
-Checksum: 32-bit FNV-1a over row, endrow, col|player|type|quant of `chart->notes`.
-`chartGen` increments per snapshot; host drops guest edits with stale gen.
+Section blobs: meta = 12 strings + f64 preview start/length + u8 selectable;
+tempo = u8 present, f64 offset, i32 display BPM type, f64×2 range,
+`SegmentGroup::encode`, attacks, keysounds, misc; props = str artist,
+i32 difficulty, i32 meter. Checksum: 32-bit FNV-1a over row, endrow,
+col|player|type|quant.
 
 ## Threading
-- `NetLink` owns one `std::jthread`: host = accept loop (one peer; extras accepted
-  and closed), guest = non-blocking connect (5 s timeout) then serve loop
-  (`select` every 20 ms). Mutex-guarded `myInbox` (NetEvent: CONNECTED/LOST/FAILED/FRAME)
-  and `myOutbox` (raw frames). `dropPeer()` closes after flushing; `stop()` flushes
-  best-effort (~200 ms), joins, clears queues.
-- Main thread only: `SessionImpl::tick()` drains inbox; all editor state touched there.
+- `NetLink` owns one `std::jthread` running `myRun`: host = listener + any
+  number of connections, guest = one connection (after a 5 s non-blocking
+  connect). `NetSocket::pollAll` every 20 ms. Mutex-guarded inbox (NetEvent
+  CONNECTED/LOST/FAILED/FRAME with peer id) and outbox (peer id + frame).
+  `dropPeer(id)` closes after flushing; `stop()` flushes best-effort, joins.
+- Main thread only: `SessionImpl::tick()` (start of `Editor::tick`) flushes
+  sections, drains the inbox, sends presence (≤ 30/s, on change), rebuilds
+  `getPeers()`. `drawCursors()` is called after the notefield is drawn.
+- Winsock is started lazily on the first host/join.
 
-## State machine
-- Host: IDLE → `host(port)` → LISTENING → CONNECTED event → HANDSHAKE → Hello ok →
-  CONNECTED (send snapshot) / reject (SongCheck fail, dropPeer, back to LISTENING).
-  Guest loss → LISTENING.
-- Guest: IDLE → `join("ip:port")` → CONNECTING → HANDSHAKE (send Hello) →
-  SongCheck ok → CONNECTED. Failure/loss/Disconnect → `myEndSession()`.
-- `onChanges`: session ends if `VCM_FILE_CHANGED` or simfile pointer changes.
-  Host sends snapshot if chart changed or checksum ≠ last broadcast (catches
-  insert-rows etc.). Guest switching away from host chart sets `myFollowHostChart`,
-  handled next tick (reportChanges inside onChanges would be lost —
-  `notifyChanges` zeroes `myChanges` after dispatch).
-- Guest with no matching local chart: `myChart = nullptr`, edits paused.
+## Platform notes
+- **Wine**: MSVC 17.10+ `std::mutex` has a constexpr constructor that needs a
+  matching `msvcp140.dll`; Wine's builtin (and old redistributables) crash on
+  the first lock. Fixed with `_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR`.
+- **Linux**: share address uses `getifaddrs` (was showing 127.0.0.1 only);
+  `send` uses `MSG_NOSIGNAL`. Allow the port in the firewall (ufw/firewalld).
 
 ## Build notes
-- Build: VS 18 vcvars64 + ninja in `out/build/windows-debug` (`ninja` builds all
-  incl. `format` check). clang-tidy runs with `--warnings-as-errors`; avoid C-style
-  casts, use-after-move on custom types (NoteList — copy instead), unused RAII.
+- Build: VS 18 vcvars64 + ninja (`ninja` builds all incl. `format` check).
+  clang-tidy runs with `--warnings-as-errors`; avoid C-style casts.
 - Repo files are LF; don't let scripted edits convert to CRLF.
 
 ## Manual test (one machine)
-Copy song folder twice; run exe twice; A: open song, wait for audio, Shift+K → Host;
-B: open copy, Shift+K → Join `127.0.0.1:7654`. Check: guest edits appear on both;
-host Ctrl+Z undoes guest edits; guest Ctrl+Z warns; host chart switch → guest follows;
-changed offset/title in B → rejected with reason.
+Copy the song folder twice; run the exe twice; A: open song, wait for audio,
+Shift+K → Name, Host; B: open the copy, Shift+K → Name, Join `127.0.0.1:7654`.
+Check: B's title/offset/charts become A's; edits on either side appear on both;
+moving the mouse shows a named cursor on the other side and a marker on the
+scrub bar; A's Ctrl+Z never removes B's notes; B's Ctrl+Z reverts B's edits on
+both. Start a third instance to check more than one guest.
 
-## Ideas for phase 2
-Tempo/timing sync, guest undo forwarded to host, >2 peers, cursors, IPv6, NAT traversal,
-hash audio off main thread, guest-side chart creation.
+## Ideas for phase 3
+Chart creation/deletion sync, BG changes, IPv6, NAT traversal, hashing audio off
+the main thread, selection/region sharing, chat.

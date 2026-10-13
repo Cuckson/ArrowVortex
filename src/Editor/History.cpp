@@ -7,7 +7,6 @@
 #include <System/System.h>
 
 #include <Editor/Common.h>
-#include <Editor/Session.h>
 
 #define HISTORY ((HistoryImpl*)gHistory)
 
@@ -284,11 +283,7 @@ struct HistoryImpl : public History {
 
     void onKeyPress(KeyPress& evt) override {
         if (evt.handled == false && (evt.keyflags & Keyflag::CTRL)) {
-            if ((evt.key == Key::Z || evt.key == Key::Y) && gSession &&
-                gSession->blocksUndo()) {
-                HudWarning("Undo/redo is disabled for a session guest.");
-                evt.handled = true;
-            } else if (evt.key == Key::Z) {
+            if (evt.key == Key::Z) {
                 undoEntry();
             } else if (evt.key == Key::Y) {
                 redoEntry();

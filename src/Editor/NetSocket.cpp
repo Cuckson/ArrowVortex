@@ -12,6 +12,8 @@
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -85,8 +87,32 @@ void NetSocket::shutdown() {
 #endif
 }
 
+static void AddAddress(std::vector<std::string>& out, const sockaddr* addr) {
+    if (!addr || addr->sa_family != AF_INET) return;
+    char buf[INET_ADDRSTRLEN] = {};
+    const auto* in = reinterpret_cast<const sockaddr_in*>(addr);
+    if (!inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf))) return;
+    std::string ip = buf;
+    if (ip.rfind("127.", 0) == 0) return;
+    if (std::find(out.begin(), out.end(), ip) == out.end()) out.push_back(ip);
+}
+
 std::vector<std::string> NetSocket::localAddresses() {
     std::vector<std::string> out;
+#ifndef _WIN32
+    // The host name usually resolves to a loopback address on Linux (e.g.
+    // 127.0.1.1 in /etc/hosts), so ask the network interfaces directly.
+    ifaddrs* ifs = nullptr;
+    if (getifaddrs(&ifs) == 0) {
+        for (ifaddrs* it = ifs; it; it = it->ifa_next) {
+            if ((it->ifa_flags & IFF_UP) && !(it->ifa_flags & IFF_LOOPBACK)) {
+                AddAddress(out, it->ifa_addr);
+            }
+        }
+        freeifaddrs(ifs);
+    }
+    if (!out.empty()) return out;
+#endif
     char name[256] = {};
     if (gethostname(name, sizeof(name) - 1) != 0) return out;
 
@@ -95,20 +121,59 @@ std::vector<std::string> NetSocket::localAddresses() {
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* list = nullptr;
     if (getaddrinfo(name, nullptr, &hints, &list) != 0) return out;
-
     for (addrinfo* it = list; it; it = it->ai_next) {
-        char buf[INET_ADDRSTRLEN] = {};
-        auto* addr = reinterpret_cast<sockaddr_in*>(it->ai_addr);
-        if (inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf))) {
-            std::string ip = buf;
-            if (ip.rfind("127.", 0) != 0 &&
-                std::find(out.begin(), out.end(), ip) == out.end()) {
-                out.push_back(ip);
-            }
-        }
+        AddAddress(out, it->ai_addr);
     }
     freeaddrinfo(list);
     return out;
+}
+
+bool NetSocket::pollAll(std::vector<PollItem>& items, int timeoutMs) {
+    fd_set readSet, writeSet, errorSet;
+    FD_ZERO(&readSet);
+    FD_ZERO(&writeSet);
+    FD_ZERO(&errorSet);
+    NativeSocket maxSocket = 0;
+    bool any = false;
+    for (auto& item : items) {
+        item.result = 0;
+        if (!item.socket || !item.socket->isValid()) {
+            item.result = POLL_ERROR;
+            continue;
+        }
+        NativeSocket s = ToNative(item.socket->myHandle);
+        FD_SET(s, &readSet);
+        FD_SET(s, &errorSet);
+        if (item.wantWrite) FD_SET(s, &writeSet);
+        maxSocket = std::max(maxSocket, s);
+        any = true;
+    }
+
+    timeval tv;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+
+#ifdef _WIN32
+    // Winsock rejects a select without sockets.
+    if (!any) {
+        Sleep(static_cast<DWORD>(timeoutMs));
+        return true;
+    }
+    int res = select(0, &readSet, &writeSet, &errorSet, &tv);
+#else
+    int res =
+        select(any ? maxSocket + 1 : 0, &readSet, &writeSet, &errorSet, &tv);
+#endif
+    if (res < 0) return false;
+
+    for (auto& item : items) {
+        if (item.result != 0) continue;
+        NativeSocket s = ToNative(item.socket->myHandle);
+        if (FD_ISSET(s, &readSet)) item.result |= POLL_READ;
+        if (FD_ISSET(s, &writeSet)) item.result |= POLL_WRITE;
+        if (FD_ISSET(s, &errorSet)) item.result |= POLL_ERROR;
+    }
+    return true;
 }
 
 // ================================================================================================
@@ -165,8 +230,15 @@ bool NetSocket::listen(int port, std::string& error) {
     }
 
     int reuse = 1;
+#ifdef _WIN32
+    // On Windows SO_REUSEADDR lets another program take over the port; make
+    // sure a second session on the same port fails instead.
+    setsockopt(ToNative(myHandle), SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#else
     setsockopt(ToNative(myHandle), SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#endif
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -179,7 +251,7 @@ bool NetSocket::listen(int port, std::string& error) {
         close();
         return false;
     }
-    if (::listen(ToNative(myHandle), 1) != 0) {
+    if (::listen(ToNative(myHandle), 8) != 0) {
         error = ErrorText("Could not listen");
         close();
         return false;

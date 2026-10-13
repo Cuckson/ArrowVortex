@@ -545,6 +545,31 @@ struct SimfileManImpl : public SimfileMan {
 
     const Simfile* get() const override { return mySimfile; }
 
+    Simfile* getForRemoteEdit() override { return mySimfile; }
+
+    void onRemoteChartsChanged(const Chart* open, bool reload) override {
+        if (!mySimfile) return;
+
+        const Chart* target = open ? open : myChart;
+        sortCharts();
+
+        int index = -1;
+        for (int i = 0; i < static_cast<int>(mySimfile->charts.size()); ++i) {
+            if (mySimfile->charts[i] == target) index = i;
+        }
+        if (index < 0 && target && !mySimfile->charts.empty()) index = 0;
+
+        bool sameChart =
+            (index >= 0 ? mySimfile->charts[index] : nullptr) == myChart;
+        myChartIndex = index;
+        if (sameChart && !reload) {
+            gEditor->reportChanges(VCM_CHART_PROPERTIES_CHANGED);
+        } else {
+            myUpdateChart();
+        }
+        gEditor->reportChanges(VCM_CHART_LIST_CHANGED);
+    }
+
 };  // SimfileManImpl
 
 // ================================================================================================

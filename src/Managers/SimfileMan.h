@@ -69,6 +69,18 @@ struct SimfileMan {
 
     /// Returns the active simfile.
     virtual const Simfile* get() const = 0;
+
+    /// Returns the active simfile for a co-editing session, which applies
+    /// changes received from other users directly, without history entries.
+    /// Call onRemoteChartsChanged after changing the chart list or the chart
+    /// properties.
+    virtual Simfile* getForRemoteEdit() = 0;
+
+    /// Called after the chart list or chart properties were changed by a
+    /// co-editing session. Sorts the charts and opens the given chart, or keeps
+    /// the active chart open if it is null and still in the list. If reload is
+    /// true, the active chart is reloaded even if it stays open.
+    virtual void onRemoteChartsChanged(const Chart* open, bool reload) = 0;
 };
 
 extern SimfileMan* gSimfile;

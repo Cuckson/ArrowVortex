@@ -69,6 +69,11 @@ struct TempoMan {
     /// speed can use beats or time.
     virtual double positionToSpeed(double beat, double time) const = 0;
 
+    /// Called after a tempo of the simfile or one of its charts was replaced
+    /// directly by a co-editing session, without a history entry. Pass null
+    /// if any tempo may have changed.
+    virtual void onRemoteTempoChanged(Tempo* tempo) = 0;
+
     /// Editing functions.
     virtual void modify(const SegmentEdit& edit) = 0;
     virtual void modify(const SegmentEdit& edit, bool clearRegion) = 0;

@@ -122,6 +122,23 @@ struct TempoManImpl : public TempoMan {
         }
     }
 
+    void onRemoteTempoChanged(Tempo* tempo) override {
+        // A chart can switch between song and split timing.
+        Tempo* active = nullptr;
+        if (myChart && myChart->hasTempo()) {
+            active = myChart->getTempo(mySimfile);
+        } else if (mySimfile) {
+            active = mySimfile->tempo;
+        }
+
+        // A null tempo means any tempo may have changed.
+        if (active != myTempo || myTempo == tempo || !tempo) {
+            stopTweaking(false);
+            myTempo = active;
+            myUpdateTimingData();
+        }
+    }
+
     // ================================================================================================
     // TempoManImpl :: edit helper functions.
 
